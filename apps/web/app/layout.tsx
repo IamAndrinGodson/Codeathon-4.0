@@ -1,6 +1,7 @@
 // app/layout.tsx — Root layout with SessionProvider
 import type { Metadata } from "next";
 import "./globals.css";
+import CyberCursor from "@/components/ui/CyberCursor";
 
 export const metadata: Metadata = {
   title: "NEXUS TLS — Secure Session Management",
@@ -22,7 +23,10 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="antialiased">{children}</body>
+      <body className="antialiased">
+        <CyberCursor />
+        {children}
+      </body>
     </html>
   );
 }

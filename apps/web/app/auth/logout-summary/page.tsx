@@ -18,7 +18,17 @@ export default function LogoutSummaryPage() {
                 @keyframes pulse-icon { from { transform: scale(1); } to { transform: scale(1.05); } }
                 @keyframes subtleFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
                 @keyframes scanline { 0% { transform: translateY(-100%); opacity: 0; } 50% { opacity: 0.1; } 100% { transform: translateY(100vh); opacity: 0; } }
+                @keyframes orbFloat1 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(10vw, 15vh) scale(1.1); } }
+                @keyframes orbFloat2 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-10vw, -15vh) scale(1.1); } }
+                @keyframes gridMove { 0% { background-position: 0 0; } 100% { background-position: 50px 50px; } }
             `}</style>
+
+            {/* Dynamic Grid Background */}
+            <div style={{ position: "fixed", inset: 0, zIndex: 0, backgroundImage: "linear-gradient(rgba(0, 229, 160, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 229, 160, 0.03) 1px, transparent 1px)", backgroundSize: "50px 50px", animation: "gridMove 15s linear infinite", pointerEvents: "none" }}></div>
+
+            {/* Floating Cyber Orbs */}
+            <div style={{ position: "fixed", top: "-10%", left: "-5%", width: "40vw", height: "40vw", background: "radial-gradient(circle, rgba(0,229,160,0.08) 0%, rgba(0,0,0,0) 70%)", borderRadius: "50%", filter: "blur(60px)", animation: "orbFloat1 20s ease-in-out infinite", pointerEvents: "none", zIndex: 0 }}></div>
+            <div style={{ position: "fixed", bottom: "-10%", right: "-5%", width: "40vw", height: "40vw", background: "radial-gradient(circle, rgba(0,136,255,0.08) 0%, rgba(0,0,0,0) 70%)", borderRadius: "50%", filter: "blur(60px)", animation: "orbFloat2 25s ease-in-out infinite", pointerEvents: "none", zIndex: 0 }}></div>
 
             {/* OLED Scanline Overlay */}
             <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, pointerEvents: "none", zIndex: 0, background: "linear-gradient(to bottom, transparent 50%, rgba(0,0,0,0.2) 51%)", backgroundSize: "100% 4px", opacity: 0.15 }}></div>

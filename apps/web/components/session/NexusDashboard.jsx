@@ -567,6 +567,9 @@ export default function App() {
         @keyframes scanline { 0% { transform: translateY(-100%); opacity: 0; } 50% { opacity: 0.1; } 100% { transform: translateY(100vh); opacity: 0; } }
         @keyframes gradientShift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
         @keyframes subtleFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+        @keyframes orbFloat1 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(10vw, 15vh) scale(1.1); } }
+        @keyframes orbFloat2 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-10vw, -15vh) scale(1.1); } }
+        @keyframes gridMove { 0% { background-position: 0 0; } 100% { background-position: 50px 50px; } }
 
         .vnav-btn{background:none;border:none;cursor:pointer;padding:8px 18px;border-radius:8px;font-family:'Syne',sans-serif;font-size:11px;letter-spacing:1.5px;transition:all .2s;white-space:nowrap;}
         .vnav-btn.on{background:#111111;color:#00e5a0;box-shadow: 0 0 15px #00e5a011;}
@@ -578,9 +581,16 @@ export default function App() {
       <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, pointerEvents: "none", zIndex: 9999, background: "linear-gradient(to bottom, transparent 50%, rgba(0,0,0,0.2) 51%)", backgroundSize: "100% 4px", opacity: 0.15 }}></div>
       <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: "100px", background: "linear-gradient(to bottom, transparent, #00e5a011, transparent)", animation: "scanline 8s linear infinite", pointerEvents: "none", zIndex: 9998 }}></div>
 
+      {/* Dynamic Grid Background */}
+      <div style={{ position: "fixed", inset: 0, zIndex: 0, backgroundImage: "linear-gradient(rgba(0, 229, 160, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 229, 160, 0.03) 1px, transparent 1px)", backgroundSize: "50px 50px", animation: "gridMove 15s linear infinite", pointerEvents: "none" }}></div>
+
+      {/* Floating Cyber Orbs */}
+      <div style={{ position: "fixed", top: "-10%", left: "-5%", width: "40vw", height: "40vw", background: "radial-gradient(circle, rgba(0,229,160,0.08) 0%, rgba(0,0,0,0) 70%)", borderRadius: "50%", filter: "blur(60px)", animation: "orbFloat1 20s ease-in-out infinite", pointerEvents: "none", zIndex: 0 }}></div>
+      <div style={{ position: "fixed", bottom: "-10%", right: "-5%", width: "40vw", height: "40vw", background: "radial-gradient(circle, rgba(0,136,255,0.08) 0%, rgba(0,0,0,0) 70%)", borderRadius: "50%", filter: "blur(60px)", animation: "orbFloat2 25s ease-in-out infinite", pointerEvents: "none", zIndex: 0 }}></div>
+
       {showWarn && <WarnModal remaining={remaining} onExtend={extend} onLogout={logout} />}
 
-      <div style={{ minHeight: "100vh", background: "#000000", color: "#f0f6ff", paddingBottom: 48, position: "relative" }}>
+      <div style={{ minHeight: "100vh", background: "#000000", color: "#f0f6ff", paddingBottom: 48, position: "relative", zIndex: 1 }}>
 
         {/* NAV */}
         <nav style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 28px", height: 58, background: "rgba(0,0,0,0.8)", borderBottom: "1px solid #1a1a1a", backdropFilter: "blur(14px)", position: "sticky", top: 0, zIndex: 100 }}>
