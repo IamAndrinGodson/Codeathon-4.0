@@ -38,6 +38,20 @@ TIMELINE_ICONS = [
     ("Geo Check", "🗺", "info"),
     ("Bio Scan", "🧬", "info"),
 ]
+THREAT_TEMPLATES = [
+    {"action": "BLOCKED", "severity": "HIGH", "detail": "Brute-force SSH attempt from {ip}"},
+    {"action": "FLAGGED", "severity": "MEDIUM", "detail": "Geo-fence violation — login from {city}"},
+    {"action": "BLOCKED", "severity": "CRITICAL", "detail": "SQL injection payload in query param"},
+    {"action": "MONITORED", "severity": "LOW", "detail": "Unusual API rate from {ip}"},
+    {"action": "BLOCKED", "severity": "HIGH", "detail": "Invalid JWT replay attempt"},
+    {"action": "FLAGGED", "severity": "MEDIUM", "detail": "Device fingerprint mismatch"},
+    {"action": "BLOCKED", "severity": "CRITICAL", "detail": "XSS payload detected in form input"},
+    {"action": "MONITORED", "severity": "LOW", "detail": "Elevated error rate on /api/session"},
+    {"action": "FLAGGED", "severity": "HIGH", "detail": "TLS downgrade attempt from proxy"},
+    {"action": "BLOCKED", "severity": "MEDIUM", "detail": "Credential stuffing pattern from {ip}"},
+]
+THREAT_IPS = ["203.0.113.42", "198.51.100.77", "192.0.2.91", "10.255.0.13", "172.16.99.5", "45.33.32.156"]
+THREAT_CITIES = ["Lagos", "Minsk", "Unknown VPN", "São Paulo", "Pyongyang"]
 
 
 def _now() -> str:
@@ -83,6 +97,20 @@ def _generate_log(trust_score: int, risk_level: str, txn_counter: int) -> dict:
     return {"t": _now(), "msg": msg, "type": log_type}
 
 
+def _generate_threat() -> dict:
+    tpl = random.choice(THREAT_TEMPLATES)
+    return {
+        "time": _now(),
+        "action": tpl["action"],
+        "severity": tpl["severity"],
+        "detail": tpl["detail"].format(
+            ip=random.choice(THREAT_IPS),
+            city=random.choice(THREAT_CITIES),
+        ),
+        "source": random.choice(THREAT_IPS),
+    }
+
+
 # ─── WebSocket endpoint ──────────────────────────────────────────────────────
 
 @router.websocket("/ws/session/{session_id}")
@@ -94,6 +122,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
     keystroke_rhythm = 88
     mouse_velocity = 82
     scroll_pattern = 79
+    click_pattern = 88
+    dwell_time = 92
     remaining = 120
     tab_count = 1
     txn_counter = 0
@@ -101,6 +131,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
     is_off_hours = False
     last_mouse_event = time.time()
     last_key_event = time.time()
+    session_start = time.time()
 
     # Seed initial data
     transactions = [_generate_txn(i) for i in range(5)]
@@ -120,11 +151,32 @@ async def ws_session(websocket: WebSocket, session_id: str):
         {"id": "tab-1", "title": "Dashboard", "route": "/dashboard", "active": True, "idle": False, "lastAct": _now()},
     ]
 
+    # Trust score history for area chart (last 30 points)
+    trust_history = [trust_score] * 5
+
+    # Threat feed
+    threats = [_generate_threat() for _ in range(3)]
+
+    # Notification queue
+    notifications = []
+    notification_id = 0
+
+    # System-wide stats (simulated)
+    system_stats = {
+        "uptime": 99.97,
+        "activeSessions": random.randint(142, 196),
+        "avgTrustScore": trust_score,
+        "p95Latency": round(random.uniform(12, 28), 1),
+        "totalRequests": random.randint(45000, 62000),
+        "blockedThreats": random.randint(12, 34),
+    }
+
     tick = 0
 
     # ── Telemetry receiver (runs concurrently) ──
     async def receive_telemetry():
         nonlocal trust_score, last_mouse_event, last_key_event, tab_count, tabs, remaining
+        nonlocal notification_id, notifications
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -137,32 +189,34 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
                 if evt_type == "mousemove":
                     last_mouse_event = time.time()
-                    # Active mouse use boosts trust slightly
                     trust_score = min(99, trust_score + random.choice([0, 0, 1]))
-                    # Reset timer on activity
-                    remaining = max(remaining, 120)
+                    remaining = max(remaining, adapted_timeout)
 
                 elif evt_type == "keydown":
                     last_key_event = time.time()
                     trust_score = min(99, trust_score + random.choice([0, 1]))
-                    # Reset timer on activity
-                    remaining = max(remaining, 120)
+                    remaining = max(remaining, adapted_timeout)
 
                 elif evt_type == "EXTEND":
-                    # User clicked "Extend" or "Stay Logged In"
-                    remaining = 120
+                    remaining = adapted_timeout
                     last_mouse_event = time.time()
                     last_key_event = time.time()
+                    notification_id += 1
+                    notifications.append({
+                        "id": notification_id,
+                        "type": "success",
+                        "title": "Session Extended",
+                        "message": f"Timer reset to {adapted_timeout//60:02d}:{adapted_timeout%60:02d} (adapted)",
+                        "time": _now(),
+                    })
 
                 elif evt_type == "ACTIVITY":
-                    # General activity reset
                     last_mouse_event = time.time()
                     last_key_event = time.time()
-                    remaining = max(remaining, 120)
+                    remaining = max(remaining, adapted_timeout)
 
                 elif evt_type == "TAB_OPEN":
                     tab_id = msg.get("tabId", f"tab-{tab_count + 1}")
-                    # Avoid duplicate tab IDs
                     if any(t["id"] == tab_id for t in tabs):
                         continue
                     tab_count += 1
@@ -179,6 +233,28 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     tab_id = msg.get("tabId")
                     tabs = [t for t in tabs if t["id"] != tab_id]
                     tab_count = max(1, tab_count - 1)
+
+                elif evt_type == "POLICY_UPDATE":
+                    # Update base timeout dynamically
+                    new_base = msg.get("baseTimeout", 120)
+                    remaining = new_base
+                    
+                    # Log the change
+                    notification_id += 1
+                    notifications.append({
+                        "id": notification_id,
+                        "type": "success",
+                        "title": "Policies Deployed",
+                        "message": f"Base timeout set to {new_base}m. Bio drop at {msg.get('bioDrop', 60)}.",
+                        "time": _now(),
+                    })
+                    
+                    logs.insert(0, {
+                        "t": _now(),
+                        "msg": f"Global policies updated by admin — Base T/O: {new_base}m",
+                        "type": "info"
+                    })
+                    logs = logs[:20]
 
         except WebSocketDisconnect:
             pass
@@ -199,14 +275,12 @@ async def ws_session(websocket: WebSocket, session_id: str):
             key_idle = now - last_key_event
 
             if mouse_idle > 10:
-                # No mouse for 10s+ → trust drifts down
                 drift = random.choice([-2, -1, -1, -1, 0])
                 trust_score = max(30, trust_score + drift)
             elif mouse_idle > 5:
                 drift = random.choice([-1, 0, 0, 0])
                 trust_score = max(40, trust_score + drift)
             else:
-                # Active → small positive drift
                 drift = random.choice([0, 0, 0, 1])
                 trust_score = min(99, trust_score + drift)
 
@@ -214,10 +288,26 @@ async def ws_session(websocket: WebSocket, session_id: str):
             keystroke_rhythm = max(50, min(99, trust_score + random.randint(-8, 8)))
             mouse_velocity = max(50, min(99, trust_score + random.randint(-10, 10)))
             scroll_pattern = max(50, min(99, trust_score + random.randint(-6, 6)))
+            click_pattern = max(50, min(99, trust_score + random.randint(-5, 7)))
+            dwell_time = max(55, min(99, trust_score + random.randint(-3, 9)))
+
+            # ── Trust history (for chart) ──
+            trust_history.append(trust_score)
+            if len(trust_history) > 30:
+                trust_history = trust_history[-30:]
 
             # ── Occasionally toggle geo anomaly or off-hours ──
             if tick % 15 == 0:
                 is_geo_anomaly = random.random() < 0.15
+                if is_geo_anomaly:
+                    notification_id += 1
+                    notifications.append({
+                        "id": notification_id,
+                        "type": "warning",
+                        "title": "Geo Anomaly Detected",
+                        "message": f"Login attempt from {random.choice(THREAT_CITIES)}",
+                        "time": _now(),
+                    })
             if tick % 20 == 0:
                 is_off_hours = random.random() < 0.2
 
@@ -258,12 +348,50 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 txn_counter += 1
                 new_txn = _generate_txn(txn_counter)
                 transactions.insert(0, new_txn)
-                transactions = transactions[:10]  # keep last 10
+                transactions = transactions[:12]  # keep last 12
+
+                # Notification for high-risk TXN
+                if new_txn["risk"] == "HIGH":
+                    notification_id += 1
+                    notifications.append({
+                        "id": notification_id,
+                        "type": "danger",
+                        "title": "High-Risk Transaction",
+                        "message": f"{new_txn['id']} — {new_txn['amount']} flagged",
+                        "time": _now(),
+                    })
 
             # ── Generate new log entry every tick ──
             new_log = _generate_log(trust_score, risk_level, txn_counter)
             logs.insert(0, new_log)
-            logs = logs[:20]  # keep last 20
+            logs = logs[:20]
+
+            # ── Threat feed (new threat every ~5 ticks) ──
+            if tick % 5 == 0:
+                new_threat = _generate_threat()
+                threats.insert(0, new_threat)
+                threats = threats[:15]
+
+                if new_threat["severity"] == "CRITICAL":
+                    notification_id += 1
+                    notifications.append({
+                        "id": notification_id,
+                        "type": "danger",
+                        "title": "Critical Threat",
+                        "message": new_threat["detail"][:60],
+                        "time": _now(),
+                    })
+
+            # ── Trust score drop notification ──
+            if trust_score < 60 and tick % 4 == 0:
+                notification_id += 1
+                notifications.append({
+                    "id": notification_id,
+                    "type": "warning",
+                    "title": "Trust Score Low",
+                    "message": f"Biometric score dropped to {trust_score} — step-up auth may trigger",
+                    "time": _now(),
+                })
 
             # ── Grow timeline ──
             if tick % 5 == 0 and len(timeline) < 12:
@@ -280,6 +408,25 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 if tab["active"]:
                     tab["lastAct"] = _now()
 
+            # ── System stats drift ──
+            system_stats["activeSessions"] = max(80, min(250, system_stats["activeSessions"] + random.randint(-3, 3)))
+            system_stats["avgTrustScore"] = round((system_stats["avgTrustScore"] * 0.9 + trust_score * 0.1), 1)
+            system_stats["p95Latency"] = round(max(8, min(45, system_stats["p95Latency"] + random.uniform(-2, 2))), 1)
+            system_stats["totalRequests"] += random.randint(20, 80)
+            system_stats["blockedThreats"] += (1 if tick % 5 == 0 else 0)
+
+            # ── Session elapsed ──
+            elapsed = int(now - session_start)
+            elapsed_str = f"{elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
+
+            # ── Transaction volume (sum of current TXNs) ──
+            txn_volume = 0
+            for txn in transactions:
+                try:
+                    txn_volume += _rand_amount_paise(txn["amount"]) // 100
+                except (ValueError, KeyError):
+                    pass
+
             # ── Build payload ──
             payload = {
                 "remaining": remaining,
@@ -289,15 +436,27 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 "keystrokeRhythm": keystroke_rhythm,
                 "mouseVelocity": mouse_velocity,
                 "scrollPattern": scroll_pattern,
+                "clickPattern": click_pattern,
+                "dwellTime": dwell_time,
                 "tabs": tabs,
-                "sessionLog": [{"time": l["t"], "msg": l["msg"], "type": l["type"]} for l in logs],
+                "sessionLog": [{"t": l["t"], "msg": l["msg"], "type": l["type"]} for l in logs],
                 "riskFactors": risk_factors,
                 "transactions": transactions,
                 "timeline": timeline_out,
                 "geoAnomaly": is_geo_anomaly,
                 "showWarning": remaining <= 30,
                 "isActive": mouse_idle < 10,
+                # New business-class fields
+                "trustHistory": trust_history,
+                "threats": threats,
+                "systemStats": system_stats,
+                "notifications": notifications[-5:],  # last 5 pending
+                "sessionElapsed": elapsed_str,
+                "txnVolume": txn_volume,
             }
+
+            # Clear delivered notifications
+            notifications = []
 
             try:
                 await websocket.send_text(json.dumps(payload))

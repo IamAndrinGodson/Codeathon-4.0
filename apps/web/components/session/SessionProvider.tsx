@@ -15,7 +15,6 @@ const BASE_TIMEOUT = 120;
 const WARN_AT = 30;
 const HEARTBEAT_INTERVAL = 15_000;
 const ACTIVITY_DEBOUNCE = 1_500;
-const BIOMETRIC_INTERVAL = 10_000;
 const WS_URL = "ws://localhost:8000/ws/session/demo";
 const WS_RECONNECT_DELAY = 3_000;
 
@@ -38,7 +37,7 @@ export interface TabInfo {
 }
 
 export interface SessionEvent {
-    time: string;
+    t: string;
     msg: string;
     type: string;
 }
@@ -66,6 +65,31 @@ export interface TimelineEvent {
     type: string;
 }
 
+export interface ThreatEntry {
+    time: string;
+    action: string;
+    severity: string;
+    detail: string;
+    source: string;
+}
+
+export interface ToastNotification {
+    id: number;
+    type: string;
+    title: string;
+    message: string;
+    time: string;
+}
+
+export interface SystemStats {
+    uptime: number;
+    activeSessions: number;
+    avgTrustScore: number;
+    p95Latency: number;
+    totalRequests: number;
+    blockedThreats: number;
+}
+
 interface SessionState {
     remaining: number;
     adaptedTimeout: number;
@@ -74,6 +98,8 @@ interface SessionState {
     keystrokeRhythm: number;
     mouseVelocity: number;
     scrollPattern: number;
+    clickPattern: number;
+    dwellTime: number;
     showWarning: boolean;
     isActive: boolean;
     tabs: TabInfo[];
@@ -82,9 +108,19 @@ interface SessionState {
     transactions: Transaction[];
     timeline: TimelineEvent[];
     wsConnected: boolean;
+    // Business-class fields
+    trustHistory: number[];
+    threats: ThreatEntry[];
+    systemStats: SystemStats;
+    notifications: ToastNotification[];
+    sessionElapsed: string;
+    txnVolume: number;
+    geoAnomaly: boolean;
     extend: () => void;
     killTab: (tabId: string) => void;
     logout: () => void;
+    dismissNotification: (id: number) => void;
+    updatePolicies: (baseTimeout: number, bioDrop: number, geoRadius: number, toggles: { strictGeo: boolean; killSync: boolean; threatBlock: boolean; jwtRot: boolean; txnRules: boolean }) => void;
 }
 
 const SessionContext = createContext<SessionState | null>(null);
@@ -97,6 +133,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const [keystrokeRhythm, setKeystrokeRhythm] = useState(88);
     const [mouseVelocity, setMouseVelocity] = useState(82);
     const [scrollPattern, setScrollPattern] = useState(79);
+    const [clickPattern, setClickPattern] = useState(88);
+    const [dwellTime, setDwellTime] = useState(92);
     const [showWarning, setShowWarning] = useState(false);
     const [isActive, setIsActive] = useState(true);
     const [riskFactors, setRiskFactors] = useState<RiskFactor[]>([]);
@@ -104,11 +142,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         { id: "tab-1", title: "Dashboard", route: "/dashboard", active: true, idle: false, lastAct: new Date().toTimeString().slice(0, 8) },
     ]);
     const [sessionLog, setSessionLog] = useState<SessionEvent[]>([
-        { time: new Date().toTimeString().slice(0, 8), msg: "Session opened — NEXUS TLS v2", type: "success" },
+        { t: new Date().toTimeString().slice(0, 8), msg: "Session opened — NEXUS TLS v2", type: "success" },
     ]);
     const [transactions, setTransactions] = useState<Transaction[]>([]);
     const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
     const [wsConnected, setWsConnected] = useState(false);
+
+    // Business-class state
+    const [trustHistory, setTrustHistory] = useState<number[]>([91]);
+    const [threats, setThreats] = useState<ThreatEntry[]>([]);
+    const [systemStats, setSystemStats] = useState<SystemStats>({
+        uptime: 99.97, activeSessions: 0, avgTrustScore: 91, p95Latency: 18, totalRequests: 0, blockedThreats: 0,
+    });
+    const [notifications, setNotifications] = useState<ToastNotification[]>([]);
+    const [sessionElapsed, setSessionElapsed] = useState("00:00:00");
+    const [txnVolume, setTxnVolume] = useState(0);
+    const [geoAnomaly, setGeoAnomaly] = useState(false);
 
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,7 +168,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const addLog = useCallback((msg: string, type: string) => {
         const t = new Date().toTimeString().slice(0, 8);
-        setSessionLog((prev) => [{ time: t, msg, type }, ...prev.slice(0, 19)]);
+        setSessionLog((prev) => [{ t, msg, type }, ...prev.slice(0, 19)]);
+    }, []);
+
+    const dismissNotification = useCallback((id: number) => {
+        setNotifications((prev) => prev.filter((n) => n.id !== id));
     }, []);
 
     // ── WebSocket connection to backend simulator ──
@@ -131,7 +184,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             ws.onopen = () => {
                 setWsConnected(true);
                 console.log("[NEXUS WS] Connected to backend simulator");
-                // Announce this tab
                 ws.send(JSON.stringify({
                     type: "TAB_OPEN",
                     tabId: "tab-1",
@@ -144,7 +196,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 try {
                     const data = JSON.parse(event.data);
 
-                    // Update all state from the backend payload
                     if (data.remaining !== undefined) setRemaining(data.remaining);
                     if (data.adaptedTimeout !== undefined) setAdaptedTimeout(data.adaptedTimeout);
                     if (data.riskLevel) setRiskLevel(data.riskLevel);
@@ -152,6 +203,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     if (data.keystrokeRhythm !== undefined) setKeystrokeRhythm(data.keystrokeRhythm);
                     if (data.mouseVelocity !== undefined) setMouseVelocity(data.mouseVelocity);
                     if (data.scrollPattern !== undefined) setScrollPattern(data.scrollPattern);
+                    if (data.clickPattern !== undefined) setClickPattern(data.clickPattern);
+                    if (data.dwellTime !== undefined) setDwellTime(data.dwellTime);
                     if (data.showWarning !== undefined) setShowWarning(data.showWarning);
                     if (data.isActive !== undefined) setIsActive(data.isActive);
                     if (data.tabs) setTabs(data.tabs);
@@ -159,6 +212,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     if (data.riskFactors) setRiskFactors(data.riskFactors);
                     if (data.transactions) setTransactions(data.transactions);
                     if (data.timeline) setTimeline(data.timeline);
+
+                    // Business-class fields
+                    if (data.trustHistory) setTrustHistory(data.trustHistory);
+                    if (data.threats) setThreats(data.threats);
+                    if (data.systemStats) setSystemStats(data.systemStats);
+                    if (data.notifications?.length > 0) {
+                        setNotifications((prev) => [...data.notifications, ...prev].slice(0, 8));
+                    }
+                    if (data.sessionElapsed) setSessionElapsed(data.sessionElapsed);
+                    if (data.txnVolume !== undefined) setTxnVolume(data.txnVolume);
+                    if (data.geoAnomaly !== undefined) setGeoAnomaly(data.geoAnomaly);
                 } catch (e) {
                     console.error("[NEXUS WS] Failed to parse message", e);
                 }
@@ -166,17 +230,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
             ws.onclose = () => {
                 setWsConnected(false);
-                console.log("[NEXUS WS] Disconnected — will retry in", WS_RECONNECT_DELAY, "ms");
-                // Reconnect after delay
                 wsReconnectRef.current = setTimeout(connectWs, WS_RECONNECT_DELAY);
             };
 
             ws.onerror = () => {
-                // onclose will fire after this, which handles reconnect
                 setWsConnected(false);
             };
         } catch {
-            console.warn("[NEXUS WS] WebSocket not available — falling back to simulation");
             setWsConnected(false);
         }
     }, []);
@@ -184,19 +244,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         connectWs();
         return () => {
-            if (wsRef.current) {
-                wsRef.current.close();
-                wsRef.current = null;
-            }
-            if (wsReconnectRef.current) {
-                clearTimeout(wsReconnectRef.current);
-            }
+            if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+            if (wsReconnectRef.current) clearTimeout(wsReconnectRef.current);
         };
     }, [connectWs]);
 
     // ── Activity detection (also forwards telemetry to WS) ──
     const resetTimer = useCallback(() => {
-        // Only reset timer locally if NOT connected to WS (WS drives the timer)
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             setRemaining(adaptedTimeout > 0 ? adaptedTimeout : BASE_TIMEOUT);
             setShowWarning(false);
@@ -209,25 +263,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             if (debounceRef.current) clearTimeout(debounceRef.current);
             debounceRef.current = setTimeout(resetTimer, ACTIVITY_DEBOUNCE);
 
-            // Forward telemetry to WebSocket if connected
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                 if (ev.type === "mousemove") {
                     const me = ev as MouseEvent;
-                    wsRef.current.send(JSON.stringify({
-                        type: "mousemove",
-                        x: me.clientX,
-                        y: me.clientY,
-                        timestamp: Date.now(),
-                    }));
+                    wsRef.current.send(JSON.stringify({ type: "mousemove", x: me.clientX, y: me.clientY, timestamp: Date.now() }));
                 } else if (ev.type === "keydown") {
-                    wsRef.current.send(JSON.stringify({
-                        type: "keydown",
-                        timestamp: Date.now(),
-                    }));
+                    wsRef.current.send(JSON.stringify({ type: "keydown", timestamp: Date.now() }));
                 }
             }
 
-            // Forward raw events to the biometrics Web Worker (fallback)
             if (workerRef.current) {
                 if (ev.type === "keydown") {
                     workerRef.current.postMessage({ type: "KEYDOWN", data: { timestamp: Date.now() } });
@@ -239,53 +283,36 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 }
             }
         };
-        ACTIVITY_EVENTS.forEach((e) =>
-            window.addEventListener(e, handler, { passive: true })
-        );
-        return () =>
-            ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, handler));
+        ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, handler, { passive: true }));
+        return () => ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, handler));
     }, [resetTimer]);
 
-    // ── Countdown tick (only active when WS is NOT connected) ──
+    // ── Countdown tick (only when WS is NOT connected) ──
     useEffect(() => {
-        if (wsConnected) return; // WS drives the countdown
-
+        if (wsConnected) return;
         timerRef.current = setInterval(() => {
             setRemaining((prev) => {
-                if (prev <= 1) {
-                    handleLogout();
-                    return 0;
-                }
+                if (prev <= 1) { handleLogout(); return 0; }
                 if (prev <= WARN_AT) setShowWarning(true);
                 return prev - 1;
             });
         }, 1000);
-        return () => {
-            if (timerRef.current) clearInterval(timerRef.current);
-        };
+        return () => { if (timerRef.current) clearInterval(timerRef.current); };
     }, [wsConnected]);
 
-    // ── Heartbeat to backend (only when WS is NOT connected) ──
+    // ── Heartbeat (only when WS is NOT connected) ──
     useEffect(() => {
-        if (wsConnected) return; // WS replaces heartbeat
-
+        if (wsConnected) return;
         const ping = async () => {
             try {
                 const res = await fetch("/api/session/heartbeat", { method: "POST" });
                 const data = await res.json();
-                if (!data.valid) {
-                    handleLogout();
-                    return;
-                }
+                if (!data.valid) { handleLogout(); return; }
                 setAdaptedTimeout(data.adapted_timeout);
                 setRiskLevel(data.risk_level);
-                if (data.active_factors) {
-                    setRiskFactors(data.active_factors);
-                }
+                if (data.active_factors) setRiskFactors(data.active_factors);
                 addLog("Heartbeat OK — risk: " + data.risk_level, "info");
-            } catch (e) {
-                console.error("Heartbeat failed", e);
-            }
+            } catch (e) { console.error("Heartbeat failed", e); }
         };
         ping();
         const interval = setInterval(ping, HEARTBEAT_INTERVAL);
@@ -294,17 +321,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     // ── Biometrics Web Worker (only when WS is NOT connected) ──
     useEffect(() => {
-        if (wsConnected) return; // WS drives biometric scores
-
+        if (wsConnected) return;
         try {
-            workerRef.current = new Worker(
-                new URL("../../lib/biometrics.worker.ts", import.meta.url)
-            );
+            workerRef.current = new Worker(new URL("../../lib/biometrics.worker.ts", import.meta.url));
             workerRef.current.onmessage = async (e) => {
-                if (e.data.type === "REQUEST_SCORE") {
-                    workerRef.current?.postMessage({ type: "COMPUTE_SCORE" });
-                    return;
-                }
+                if (e.data.type === "REQUEST_SCORE") { workerRef.current?.postMessage({ type: "COMPUTE_SCORE" }); return; }
                 const { score } = e.data;
                 if (score !== undefined) {
                     setBiometricScore(score);
@@ -314,8 +335,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 }
             };
         } catch {
-            // Web Worker may not be available — simulate biometric drift instead
-            console.warn("Biometrics worker not available — using simulation");
             const interval = setInterval(() => {
                 const d = () => Math.round((Math.random() - 0.5) * 6);
                 setBiometricScore((p) => Math.max(55, Math.min(99, p + d())));
@@ -328,56 +347,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return () => workerRef.current?.terminate();
     }, [wsConnected]);
 
-    // ── BroadcastChannel (cross-tab) ──
+    // ── BroadcastChannel ──
     useEffect(() => {
         try {
             broadcastRef.current = new BroadcastChannel("nexus-session");
             broadcastRef.current.onmessage = (e) => {
                 if (e.data.type === "LOGOUT") handleLogout();
                 if (e.data.type === "EXTEND") resetTimer();
-                if (e.data.type === "TABS_UPDATE") setTabs(e.data.tabs);
                 if (e.data.type === "TAB_ALIVE") {
                     setTabs((prev) => {
-                        const exists = prev.find((t) => t.id === e.data.tabId);
-                        if (exists) return prev;
-                        return [...prev, {
-                            id: e.data.tabId,
-                            title: e.data.title,
-                            route: e.data.route,
-                            active: false,
-                            idle: false,
-                            lastAct: new Date().toTimeString().slice(0, 8),
-                        }];
+                        if (prev.find((t) => t.id === e.data.tabId)) return prev;
+                        return [...prev, { id: e.data.tabId, title: e.data.title, route: e.data.route, active: false, idle: false, lastAct: new Date().toTimeString().slice(0, 8) }];
                     });
-                    // Also notify WS backend of the new tab
                     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({
-                            type: "TAB_OPEN",
-                            tabId: e.data.tabId,
-                            title: e.data.title,
-                            route: e.data.route,
-                        }));
+                        wsRef.current.send(JSON.stringify({ type: "TAB_OPEN", tabId: e.data.tabId, title: e.data.title, route: e.data.route }));
                     }
                 }
             };
-
-            // Announce this tab
             const tabId = crypto.randomUUID();
-            broadcastRef.current.postMessage({
-                type: "TAB_ALIVE",
-                tabId,
-                title: document.title,
-                route: window.location.pathname,
-            });
-        } catch {
-            console.warn("BroadcastChannel not available");
-        }
+            broadcastRef.current.postMessage({ type: "TAB_ALIVE", tabId, title: document.title, route: window.location.pathname });
+        } catch { }
         return () => broadcastRef.current?.close();
     }, [resetTimer]);
 
     const extend = useCallback(async () => {
         resetTimer();
-        // Notify WS backend to reset timer
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: "EXTEND" }));
         }
@@ -386,20 +380,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         addLog("Session extended by user", "success");
     }, [resetTimer, addLog]);
 
-    const killTab = useCallback(
-        async (tabId: string) => {
-            await fetch(`/api/session/tab/${tabId}`, { method: "DELETE" }).catch(
-                () => { }
-            );
-            setTabs((prev) => prev.filter((t) => t.id !== tabId));
-            // Notify WS backend
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: "TAB_CLOSE", tabId }));
-            }
-            addLog(`Tab killed: ${tabId}`, "warn");
-        },
-        [addLog]
-    );
+    const logout = useCallback(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "LOGOUT" }));
+        }
+    }, []);
+
+    const updatePolicies = useCallback((baseTimeout: number, bioDrop: number, geoRadius: number, toggles: any) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: "POLICY_UPDATE",
+                baseTimeout,
+                bioDrop,
+                geoRadius,
+                toggles
+            }));
+        }
+    }, []);
+
+    const killTab = useCallback(async (tabId: string) => {
+        await fetch(`/api/session/tab/${tabId}`, { method: "DELETE" }).catch(() => { });
+        setTabs((prev) => prev.filter((t) => t.id !== tabId));
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "TAB_CLOSE", tabId }));
+        }
+        addLog(`Tab killed: ${tabId}`, "warn");
+    }, [addLog]);
 
     const handleLogout = useCallback(() => {
         broadcastRef.current?.postMessage({ type: "LOGOUT" });
@@ -408,27 +414,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         window.location.href = "/auth/logout-summary";
     }, []);
 
+    // ── Auto-dismiss notifications after 6s ──
+    useEffect(() => {
+        if (notifications.length === 0) return;
+        const timer = setTimeout(() => {
+            setNotifications((prev) => prev.slice(0, -1));
+        }, 6000);
+        return () => clearTimeout(timer);
+    }, [notifications]);
+
     return (
         <SessionContext.Provider
             value={{
-                remaining,
-                adaptedTimeout,
-                riskLevel,
-                biometricScore,
-                keystrokeRhythm,
-                mouseVelocity,
-                scrollPattern,
-                showWarning,
-                isActive,
-                tabs,
-                sessionLog,
-                riskFactors,
-                transactions,
-                timeline,
-                wsConnected,
+                remaining, adaptedTimeout, riskLevel, biometricScore, keystrokeRhythm,
+                mouseVelocity, scrollPattern, clickPattern, dwellTime, showWarning, isActive,
+                tabs, sessionLog, riskFactors, transactions, timeline, wsConnected,
+                trustHistory, threats, systemStats, notifications, sessionElapsed, txnVolume,
+                geoAnomaly,
                 extend,
                 killTab,
                 logout: handleLogout,
+                dismissNotification,
+                updatePolicies,
             }}
         >
             {children}
@@ -438,7 +445,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
 export const useSessionEngine = () => {
     const ctx = useContext(SessionContext);
-    if (!ctx)
-        throw new Error("useSessionEngine must be used inside SessionProvider");
+    if (!ctx) throw new Error("useSessionEngine must be used inside SessionProvider");
     return ctx;
 };
