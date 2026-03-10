@@ -3,6 +3,7 @@
 
 import { signIn } from "next-auth/react";
 import { useState } from "react";
+import Link from "next/link";
 
 export default function LoginPage() {
     const [email, setEmail] = useState("");
@@ -276,6 +277,28 @@ export default function LoginPage() {
                         {loading ? "Authenticating..." : "Sign In →"}
                     </button>
                 </form>
+
+                {/* Registration Link */}
+                <div
+                    style={{
+                        marginTop: 24,
+                        textAlign: "center",
+                        fontSize: 11,
+                        color: "#4a6080",
+                    }}
+                >
+                    Don't have an account?{" "}
+                    <Link
+                        href="/auth/register"
+                        style={{
+                            color: "#00e5a0",
+                            textDecoration: "none",
+                            fontWeight: 600,
+                        }}
+                    >
+                        Initialize Profile
+                    </Link>
+                </div>
 
                 {/* Footer */}
                 <div

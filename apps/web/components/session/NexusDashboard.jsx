@@ -784,6 +784,95 @@ function TechStackView() {
   );
 }
 
+// ─── CLIENT ACTIVITY FEED (server monitoring panel) ─────────────────────────
+function ClientActivityFeed({ activities, tabs }) {
+  const EVENT_META = {
+    tab_open: { icon: "🔓", label: "Tab Opened", color: "#00e5a0" },
+    tab_close: { icon: "✖", label: "Tab Closed", color: "#ff4d4d" },
+    tab_visibility: { icon: "👁", label: "Visibility", color: "#00c8b0" },
+    tab_focus: { icon: "🎯", label: "Window Focus", color: "#00e5a0" },
+    tab_blur: { icon: "💨", label: "Window Blur", color: "#f5c518" },
+    tab_idle: { icon: "💤", label: "Tab Idle", color: "#ff4d4d" },
+    tab_active: { icon: "⚡", label: "Tab Active", color: "#00e5a0" },
+    page_change: { icon: "🔀", label: "Page Nav", color: "#a78bfa" },
+  };
+
+  return (
+    <div className="anim-panel anim-slide-up d3" style={{
+      background: "rgba(10, 21, 32, 0.6)", backdropFilter: "blur(12px)",
+      border: "1px solid #1e2d45", borderRadius: 14, padding: "18px",
+      display: "flex", flexDirection: "column", height: "100%", minHeight: 280,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div style={{ fontSize: 9, letterSpacing: 3, color: "#555" }}>CLIENT ACTIVITY FEED</div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#00e5a0", animation: "ping 1.5s ease-out infinite" }} />
+          <span style={{ fontSize: 8, color: "#00e5a0", fontFamily: "monospace", letterSpacing: 1 }}>LIVE</span>
+        </div>
+      </div>
+
+      {/* Active tab summary row */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {tabs.length === 0 && (
+          <span style={{ fontSize: 10, color: "#3a5070" }}>No tabs connected</span>
+        )}
+        {tabs.map(tab => {
+          const isHidden = tab.visible === false;
+          const isIdle = tab.idle;
+          const c = isIdle ? "#ff4d4d" : isHidden ? "#f5c518" : "#00e5a0";
+          const badge = isIdle ? "IDLE" : isHidden ? "HIDDEN" : tab.focused ? "FOCUSED" : "VISIBLE";
+          return (
+            <div key={tab.id} style={{
+              display: "flex", alignItems: "center", gap: 5,
+              background: `${c}11`, border: `1px solid ${c}33`,
+              borderRadius: 8, padding: "4px 8px",
+            }}>
+              <div style={{ width: 5, height: 5, borderRadius: "50%", background: c }} />
+              <span style={{ fontSize: 9, color: c, fontFamily: "monospace" }}>{badge}</span>
+              <span style={{ fontSize: 9, color: "#7a9ab0" }}>{tab.route || "/"}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Rolling event log */}
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+        {activities.length === 0 && (
+          <div style={{ textAlign: "center", color: "#3a5070", fontSize: 11, marginTop: 20 }}>Waiting for client events...</div>
+        )}
+        {activities.map((act, i) => {
+          const meta = EVENT_META[act.event] || { icon: "•", label: act.event, color: "#5a7a9a" };
+          return (
+            <div key={i} style={{
+              display: "flex", gap: 8, alignItems: "flex-start",
+              padding: "7px 10px",
+              background: i === 0 ? `${meta.color}0d` : "transparent",
+              border: `1px solid ${i === 0 ? meta.color + "22" : "transparent"}`,
+              borderRadius: 8,
+              animation: i === 0 ? "slideDown 0.3s ease-out" : "none",
+              transition: "all 0.3s",
+            }}>
+              <span style={{ fontSize: 12, flexShrink: 0 }}>{meta.icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
+                  <span style={{ fontSize: 9, color: meta.color, fontWeight: 700, letterSpacing: 1 }}>{meta.label.toUpperCase()}</span>
+                  <span style={{ fontSize: 9, color: "#3a5070", fontFamily: "monospace", flexShrink: 0 }}>{act.time}</span>
+                </div>
+                <div style={{ fontSize: 10, color: "#7a9ab0", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {act.detail}
+                </div>
+                <div style={{ fontSize: 8, color: "#2a3d55", fontFamily: "monospace", marginTop: 1 }}>
+                  tab:{act.tabId?.slice(0, 8) || "?"}...
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP PAGE ────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -821,6 +910,7 @@ export default function App() {
   const liveTimeline = session?.timeline ?? [];
   const liveTxns = session?.transactions ?? [];
   const sessionLog = session?.sessionLog ?? [];
+  const clientActivities = session?.clientActivities ?? [];
 
   const sessionExtend = session?.extend ?? (() => { });
   const killTab = session?.killTab ?? (() => { });
@@ -1069,45 +1159,10 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Real-Time Activity Monitor */}
-              <div className="anim-panel anim-slide-up d3" style={{ background: "rgba(10,21,32,0.6)", backdropFilter: "blur(12px)", border: "1px solid #1e2d45", borderRadius: 14, padding: "20px", display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 9, letterSpacing: 3, color: "#555", marginBottom: 12 }}>ACTIVITY MONITOR</div>
-                {(() => {
-                  const engagement = Math.min(100, Math.round((scores.click + scores.keystroke + scores.mouse) / 3));
-                  const eColor = engagement >= 70 ? "#00e5a0" : engagement >= 40 ? "#f5c518" : "#ff4d4d";
-                  const eLabel = engagement >= 70 ? "HIGH" : engagement >= 40 ? "MODERATE" : "LOW";
-                  return (
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-                      <div style={{ textAlign: "center", marginBottom: 4 }}>
-                        <div style={{ fontSize: 9, color: "#5a7a9a", letterSpacing: 1 }}>ENGAGEMENT LEVEL</div>
-                        <div style={{ fontSize: 32, fontWeight: 900, color: eColor, fontFamily: "'JetBrains Mono',monospace" }}>{engagement}%</div>
-                        <Tag c={eColor}>{eLabel}</Tag>
-                      </div>
-                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
-                        {[
-                          { label: "Mouse Activity", val: scores.mouse, icon: "🖱" },
-                          { label: "Keyboard Input", val: scores.keystroke, icon: "⌨" },
-                          { label: "Click Patterns", val: scores.click, icon: "👆" },
-                          { label: "Scroll Behavior", val: scores.scroll, icon: "📜" },
-                          { label: "Dwell Analysis", val: scores.dwell, icon: "⏳" }
-                        ].map(a => (
-                          <div key={a.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 11 }}>{a.icon}</span>
-                            <span style={{ fontSize: 9, color: "#5a7a9a", width: 70 }}>{a.label}</span>
-                            <div style={{ flex: 1, height: 6, background: "#0a1520", borderRadius: 3, overflow: "hidden" }}>
-                              <div style={{
-                                width: `${a.val}% `, height: "100%", borderRadius: 3, transition: "width 0.5s ease",
-                                background: a.val >= 75 ? "linear-gradient(90deg, #00e5a0, #00c8b0)" : a.val >= 50 ? "linear-gradient(90deg, #f5c518, #ffaa00)" : "linear-gradient(90deg, #ff4d4d, #ff2020)"
-                              }} />
-                            </div>
-                            <span style={{ fontSize: 9, color: "#7a9ab0", fontFamily: "monospace", width: 20 }}>{a.val}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
+
+              {/* Client Activity Feed — real-time browser events from the client */}
+              <ClientActivityFeed activities={clientActivities} tabs={tabs} />
+
 
               {/* Risk Breakdown */}
               <div className="anim-panel anim-slide-up d4" style={{ background: "rgba(10,21,32,0.6)", backdropFilter: "blur(12px)", border: "1px solid #1e2d45", borderRadius: 14, padding: "20px", display: "flex", flexDirection: "column" }}>

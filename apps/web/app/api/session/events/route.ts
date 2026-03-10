@@ -1,34 +1,64 @@
 // app/api/session/events/route.ts
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/authOptions";
 
 export async function POST(request: Request) {
-    const body = await request.json();
+    const session = await getServerSession(authOptions) as any;
+    if (!session || !session.backendToken) {
+        return NextResponse.json({ recorded: false }, { status: 401 });
+    }
 
-    // In production:
-    // Insert into session_events table (TimescaleDB hypertable)
-    // const { session_id, event_type, severity, metadata } = body;
-    // await db.insert(sessionEvents).values({ ... });
+    try {
+        const body = await request.json();
 
-    // If HIGH severity, push webhook to SIEM
-    // if (severity === "high") await pushToSIEM(body);
+        const res = await fetch("http://localhost:8000/api/events/ingest", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.backendToken}`,
+            },
+            body: JSON.stringify(body),
+        });
 
-    return NextResponse.json({ recorded: true });
+        if (!res.ok) {
+            return NextResponse.json({ recorded: false }, { status: res.status });
+        }
+
+        const data = await res.json();
+        return NextResponse.json(data);
+    } catch (e) {
+        console.error("Event ingest error", e);
+        return NextResponse.json({ recorded: false }, { status: 500 });
+    }
 }
 
 export async function GET(request: Request) {
-    // In production: fetch session events from TimescaleDB
-    // const { searchParams } = new URL(request.url);
-    // const sessionId = searchParams.get("session_id");
-    // const events = await db.select().from(sessionEvents).where(...);
+    const session = await getServerSession(authOptions) as any;
+    if (!session || !session.backendToken) {
+        return NextResponse.json({ events: [] }, { status: 401 });
+    }
 
-    // Dev placeholder
-    return NextResponse.json({
-        events: [
-            { time: "09:42:11", event_type: "TXN_AUTHORIZED", severity: "info" },
-            { time: "09:39:05", event_type: "2FA_VERIFIED", severity: "info" },
-            { time: "09:38:47", event_type: "TXN_FLAGGED", severity: "warn" },
-            { time: "09:35:22", event_type: "JWT_ROTATED", severity: "info" },
-            { time: "09:30:00", event_type: "SESSION_OPENED", severity: "info" },
-        ],
-    });
+    try {
+        const { searchParams } = new URL(request.url);
+        const sessionId = searchParams.get("session_id") || session.sessionId;
+
+        const res = await fetch(`http://localhost:8000/api/events/timeline/${sessionId}`, {
+            method: "GET",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${session.backendToken}`,
+            },
+        });
+
+        if (!res.ok) {
+            return NextResponse.json({ events: [] }, { status: res.status });
+        }
+
+        const data = await res.json();
+        return NextResponse.json(data);
+    } catch (e) {
+        console.error("Event timeline error", e);
+        return NextResponse.json({ events: [] }, { status: 500 });
+    }
 }

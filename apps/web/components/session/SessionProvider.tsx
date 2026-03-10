@@ -15,8 +15,12 @@ const BASE_TIMEOUT = 120;
 const HEARTBEAT_INTERVAL = 10000;
 const ACTIVITY_DEBOUNCE = 1500;
 const WARN_AT = 30;
-const WS_URL = "ws://localhost:8000/ws/session/real/demo"; // Connect to the real engine
-const REST_URL = "http://localhost:8000/api/session/demo";
+const IDLE_THRESHOLD_MS = 10_000; // Mark tab as idle after 10s no activity
+// Dynamic WS URL — points to the FastAPI server set in RISK_API_URL env var.
+// Falls back to localhost for local dev.
+const _apiBase = (process.env.NEXT_PUBLIC_RISK_WS_URL ||
+    (typeof window !== "undefined" ? window.location.origin.replace(/^http/, "ws") : "ws://localhost:8000"));
+const WS_URL = `${_apiBase.replace(/\/+$/, "").replace(/^http/, "ws").replace("3000", "8000")}/ws/session/real/demo`;
 const WS_RECONNECT_DELAY = 3_000;
 
 const ACTIVITY_EVENTS = [
@@ -126,6 +130,15 @@ interface SessionState {
 
 const SessionContext = createContext<SessionState | null>(null);
 
+// Stable per-tab UUID — persisted in sessionStorage so refreshes keep same ID.
+function getOrCreateTabId(): string {
+    if (typeof window === "undefined") return "ssr";
+    const key = "nexus-tab-id";
+    let id = sessionStorage.getItem(key);
+    if (!id) { id = crypto.randomUUID(); sessionStorage.setItem(key, id); }
+    return id;
+}
+
 export function SessionProvider({ children }: { children: ReactNode }) {
     const [remaining, setRemaining] = useState(BASE_TIMEOUT);
     const [adaptedTimeout, setAdaptedTimeout] = useState(BASE_TIMEOUT);
@@ -162,10 +175,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const workerRef = useRef<Worker | null>(null);
     const broadcastRef = useRef<BroadcastChannel | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const wsReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Stable identity for this browser tab
+    const tabIdRef = useRef<string>("tab-init");
+    const tabIdleRef = useRef<boolean>(false);
 
     const addLog = useCallback((msg: string, type: string) => {
         const t = new Date().toTimeString().slice(0, 8);
@@ -176,7 +193,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setNotifications((prev) => prev.filter((n) => n.id !== id));
     }, []);
 
-    // ── WebSocket connection to backend simulator ──
+    // ── Helper: send to WS if open ──
+    const wsSend = useCallback((obj: object) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify(obj));
+        }
+    }, []);
+
+    // ── WebSocket connection to backend ──
     const connectWs = useCallback(() => {
         try {
             const ws = new WebSocket(WS_URL);
@@ -184,12 +208,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
             ws.onopen = () => {
                 setWsConnected(true);
-                console.log("[NEXUS WS] Connected to backend simulator");
+                const tabId = tabIdRef.current;
+                console.log("[NEXUS WS] Connected — tabId:", tabId);
+                // Announce this tab to the server with full context
                 ws.send(JSON.stringify({
                     type: "TAB_OPEN",
-                    tabId: "tab-1",
+                    tabId,
                     title: document.title || "Dashboard",
                     route: window.location.pathname,
+                    visible: !document.hidden,
+                    focused: document.hasFocus(),
                 }));
             };
 
@@ -239,12 +267,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 wsReconnectRef.current = setTimeout(connectWs, WS_RECONNECT_DELAY);
             };
 
-            ws.onerror = () => {
-                setWsConnected(false);
-            };
+            ws.onerror = () => { setWsConnected(false); };
         } catch {
             setWsConnected(false);
         }
+    }, []);
+
+    // ── Tab ID initialisation ──
+    useEffect(() => {
+        tabIdRef.current = getOrCreateTabId();
     }, []);
 
     useEffect(() => {
@@ -255,14 +286,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         };
     }, [connectWs]);
 
-    // ── Activity detection (also forwards telemetry to WS) ──
+    // ── Activity detection + telemetry to WS ──
     const resetTimer = useCallback(() => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             setRemaining(adaptedTimeout > 0 ? adaptedTimeout : BASE_TIMEOUT);
             setShowWarning(false);
         }
         setIsActive(true);
-    }, [adaptedTimeout]);
+
+        // If this tab was idle, mark it active again
+        if (tabIdleRef.current) {
+            tabIdleRef.current = false;
+            wsSend({ type: "TAB_ACTIVE", tabId: tabIdRef.current, timestamp: Date.now() });
+        }
+        // Reset idle timer on every activity
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = setTimeout(() => {
+            tabIdleRef.current = true;
+            wsSend({ type: "TAB_IDLE", tabId: tabIdRef.current, timestamp: Date.now() });
+        }, IDLE_THRESHOLD_MS);
+    }, [adaptedTimeout, wsSend]);
 
     const lastWsPing = useRef<number>(0);
 
@@ -273,16 +316,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
             const now = Date.now();
             if (now - lastWsPing.current > 1000) {
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
                     if (ev.type === "mousemove") {
                         const me = ev as MouseEvent;
-                        wsRef.current.send(JSON.stringify({ type: "mousemove", x: me.clientX, y: me.clientY, timestamp: now }));
+                        wsSend({ type: "mousemove", x: me.clientX, y: me.clientY, tabId: tabIdRef.current, timestamp: now });
                         lastWsPing.current = now;
                     } else if (ev.type === "keydown") {
-                        wsRef.current.send(JSON.stringify({ type: "keydown", timestamp: now }));
+                        wsSend({ type: "keydown", tabId: tabIdRef.current, timestamp: now });
                         lastWsPing.current = now;
                     } else if (ev.type === "click") {
-                        wsRef.current.send(JSON.stringify({ type: "click", timestamp: now }));
+                        const ce = ev as MouseEvent;
+                        wsSend({ type: "click", tabId: tabIdRef.current, x: ce.clientX, y: ce.clientY, timestamp: now });
                         lastWsPing.current = now;
                     }
                 }
@@ -300,8 +344,95 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             }
         };
         ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, handler, { passive: true }));
-        return () => ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, handler));
-    }, [resetTimer]);
+        return () => {
+            ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, handler));
+            if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+        };
+    }, [resetTimer, wsSend]);
+
+    // ── Tab Visibility & Focus tracking ──────────────────────────────────────────
+    useEffect(() => {
+        const tabId = tabIdRef.current;
+
+        // Page Visibility API — fires when user switches browser tabs
+        const onVisibilityChange = () => {
+            const visible = !document.hidden;
+            wsSend({
+                type: "TAB_VISIBILITY",
+                tabId,
+                visible,
+                title: document.title,
+                route: window.location.pathname,
+                timestamp: Date.now(),
+            });
+            broadcastRef.current?.postMessage({
+                type: "TAB_VISIBILITY", tabId, visible,
+                title: document.title, route: window.location.pathname,
+            });
+        };
+
+        // Focus/Blur — fires when user alt-tabs to another app
+        const onFocus = () => {
+            wsSend({ type: "TAB_FOCUS", tabId, title: document.title, route: window.location.pathname, timestamp: Date.now() });
+            broadcastRef.current?.postMessage({ type: "TAB_FOCUS", tabId });
+        };
+        const onBlur = () => {
+            wsSend({ type: "TAB_BLUR", tabId, title: document.title, route: window.location.pathname, timestamp: Date.now() });
+            broadcastRef.current?.postMessage({ type: "TAB_BLUR", tabId });
+        };
+
+        // Page navigation within SPA (popstate covers browser back/forward)
+        const onPopState = () => {
+            wsSend({
+                type: "PAGE_CHANGE",
+                tabId,
+                route: window.location.pathname,
+                title: document.title,
+                timestamp: Date.now(),
+            });
+        };
+
+        // Tab close — fire TAB_CLOSE before page unloads
+        const onBeforeUnload = () => {
+            // sendBeacon is reliable during unload; WS may already be closed
+            const payload = JSON.stringify({ type: "TAB_CLOSE", tabId, title: document.title, route: window.location.pathname });
+            const apiBase = process.env.NEXT_PUBLIC_RISK_API_URL || "http://localhost:8000";
+            try { navigator.sendBeacon(`${apiBase}/api/session/tab-event`, payload); } catch { }
+            wsSend({ type: "TAB_CLOSE", tabId });
+            broadcastRef.current?.postMessage({ type: "TAB_CLOSE", tabId });
+        };
+
+        // Title change observer (catches Next.js soft-nav title updates)
+        let titleObserver: MutationObserver | null = null;
+        const titleEl = document.querySelector("title");
+        if (titleEl) {
+            titleObserver = new MutationObserver(() => {
+                wsSend({
+                    type: "PAGE_CHANGE",
+                    tabId,
+                    route: window.location.pathname,
+                    title: document.title,
+                    timestamp: Date.now(),
+                });
+            });
+            titleObserver.observe(titleEl, { childList: true });
+        }
+
+        document.addEventListener("visibilitychange", onVisibilityChange);
+        window.addEventListener("focus", onFocus);
+        window.addEventListener("blur", onBlur);
+        window.addEventListener("popstate", onPopState);
+        window.addEventListener("beforeunload", onBeforeUnload);
+
+        return () => {
+            document.removeEventListener("visibilitychange", onVisibilityChange);
+            window.removeEventListener("focus", onFocus);
+            window.removeEventListener("blur", onBlur);
+            window.removeEventListener("popstate", onPopState);
+            window.removeEventListener("beforeunload", onBeforeUnload);
+            titleObserver?.disconnect();
+        };
+    }, [wsSend]);
 
     // ── Countdown tick (only when WS is NOT connected) ──
     useEffect(() => {
@@ -363,28 +494,40 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return () => workerRef.current?.terminate();
     }, [wsConnected]);
 
-    // ── BroadcastChannel ──
+    // ── BroadcastChannel — relay other-tab events to the WS server ──
     useEffect(() => {
+        const myTabId = tabIdRef.current;
         try {
             broadcastRef.current = new BroadcastChannel("nexus-session");
             broadcastRef.current.onmessage = (e) => {
-                if (e.data.type === "LOGOUT") handleLogout();
-                if (e.data.type === "EXTEND") resetTimer();
-                if (e.data.type === "TAB_ALIVE") {
-                    setTabs((prev) => {
-                        if (prev.find((t) => t.id === e.data.tabId)) return prev;
-                        return [...prev, { id: e.data.tabId, title: e.data.title, route: e.data.route, active: false, idle: false, lastAct: new Date().toTimeString().slice(0, 8) }];
-                    });
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({ type: "TAB_OPEN", tabId: e.data.tabId, title: e.data.title, route: e.data.route }));
+                const { type, tabId } = e.data;
+                if (type === "LOGOUT") { handleLogout(); return; }
+                if (type === "EXTEND") { resetTimer(); return; }
+
+                // Relay foreign-tab events to the server via this tab's WS
+                if (tabId && tabId !== myTabId) {
+                    if (type === "TAB_ALIVE") {
+                        setTabs((prev) => {
+                            if (prev.find((t) => t.id === tabId)) return prev;
+                            return [...prev, { id: tabId, title: e.data.title, route: e.data.route, active: false, idle: false, lastAct: new Date().toTimeString().slice(0, 8) }];
+                        });
+                        wsSend({ type: "TAB_OPEN", tabId, title: e.data.title, route: e.data.route, visible: true, focused: false });
+                    } else if (type === "TAB_CLOSE") {
+                        wsSend({ type: "TAB_CLOSE", tabId });
+                    } else if (type === "TAB_VISIBILITY") {
+                        wsSend({ type: "TAB_VISIBILITY", tabId, visible: e.data.visible, route: e.data.route, title: e.data.title, timestamp: Date.now() });
+                    } else if (type === "TAB_FOCUS") {
+                        wsSend({ type: "TAB_FOCUS", tabId, timestamp: Date.now() });
+                    } else if (type === "TAB_BLUR") {
+                        wsSend({ type: "TAB_BLUR", tabId, timestamp: Date.now() });
                     }
                 }
             };
-            const tabId = crypto.randomUUID();
-            broadcastRef.current.postMessage({ type: "TAB_ALIVE", tabId, title: document.title, route: window.location.pathname });
+            // Announce this tab
+            broadcastRef.current.postMessage({ type: "TAB_ALIVE", tabId: myTabId, title: document.title, route: window.location.pathname });
         } catch { }
         return () => broadcastRef.current?.close();
-    }, [resetTimer]);
+    }, [resetTimer, wsSend]);
 
     const extend = useCallback(async () => {
         resetTimer();

@@ -95,6 +95,18 @@ async def _ensure_session(session_id: str):
             row.status = "ACTIVE"
             await db.commit()
             return 85, 120
+
+        # Ensure "demo-user" exists to satisfy user_id ForeignKey
+        u_q = select(models.UserModel).where(models.UserModel.id == "demo-user")
+        u_res = await db.execute(u_q)
+        if not u_res.scalars().first():
+            db.add(models.UserModel(
+                id="demo-user",
+                email="demo@nexus.io",
+                password_hash="mock",
+                role="operator"
+            ))
+
         db.add(models.SessionModel(
             id=session_id, user_id="demo-user",
             base_timeout=120, adapted_timeout=120,
@@ -143,7 +155,8 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
     session_start = time.time()
 
     trust_history = [trust_score] * 5
-    tabs = []
+    # tabs dict: id → rich state
+    tabs_state: dict = {}   # {tabId: {id, title, route, visible, focused, idle, lastAct}}
     tab_count = 0
     threats = []
     notifications = []
@@ -152,6 +165,8 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
     tick = 0
     txn_counter = 0
     is_geo_anomaly = False
+    # Rolling client activity log (last 30 real events from browser)
+    client_activities: list = []
 
     # Cached DB results (refreshed every few ticks)
     cached_logs = []
@@ -170,7 +185,8 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
     # ── Telemetry receiver ──
     async def receive_telemetry():
         nonlocal last_mouse, last_key, trust_score, remaining, adapted_timeout
-        nonlocal tab_count, tabs, nid, notifications, base_timeout
+        nonlocal tab_count, nid, notifications, base_timeout
+        nonlocal tabs_state, client_activities
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -180,7 +196,10 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     continue
 
                 evt = msg.get("type", "")
+                tab_id = msg.get("tabId", "")
+                now_str = _now()
 
+                # ── Basic activity events ──────────────────────────────────
                 if evt == "mousemove":
                     last_mouse = time.time()
 
@@ -199,7 +218,7 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                         "id": nid, "type": "success",
                         "title": "Session Extended",
                         "message": f"Timer reset to {adapted_timeout // 60:02d}:{adapted_timeout % 60:02d}",
-                        "time": _now(),
+                        "time": now_str,
                     })
                     asyncio.create_task(_persist_log(session_id, "User extended session", "success"))
 
@@ -207,18 +226,139 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     last_mouse = time.time()
                     last_key = time.time()
 
+                # ── Tab lifecycle ──────────────────────────────────────────
                 elif evt == "TAB_OPEN":
-                    tid = msg.get("tabId", f"tab-{tab_count + 1}")
-                    if not any(t["id"] == tid for t in tabs):
-                        tab_count += 1
-                        tabs.append({"id": tid, "title": msg.get("title", "Tab"),
-                                     "route": msg.get("route", "/"), "active": False,
-                                     "idle": False, "lastAct": _now()})
+                    tab_count += 1
+                    tabs_state[tab_id] = {
+                        "id": tab_id,
+                        "title": msg.get("title", f"Tab {tab_count}"),
+                        "route": msg.get("route", "/"),
+                        "visible": msg.get("visible", True),
+                        "focused": msg.get("focused", False),
+                        "idle": False,
+                        "lastAct": now_str,
+                    }
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_open",
+                        "detail": f"Opened: {msg.get('route', '/')} — {msg.get('title', 'Tab')}",
+                    })
+                    asyncio.create_task(_persist_log(
+                        session_id,
+                        f"Tab opened: {msg.get('route', '/')} [{tab_id[:8]}]",
+                        "info"
+                    ))
 
                 elif evt == "TAB_CLOSE":
-                    tid = msg.get("tabId")
-                    tabs = [t for t in tabs if t["id"] != tid]
-                    tab_count = max(1, tab_count - 1)
+                    if tab_id in tabs_state:
+                        route = tabs_state[tab_id].get("route", "/")
+                        del tabs_state[tab_id]
+                        tab_count = max(0, tab_count - 1)
+                        client_activities.insert(0, {
+                            "time": now_str, "tabId": tab_id,
+                            "event": "tab_close",
+                            "detail": f"Closed tab: {route} [{tab_id[:8]}]",
+                        })
+                        asyncio.create_task(_persist_log(
+                            session_id,
+                            f"Tab closed: {route} [{tab_id[:8]}]",
+                            "warning"
+                        ))
+
+                # ── Visibility (user switched browser tabs) ─────────────────
+                elif evt == "TAB_VISIBILITY":
+                    visible = msg.get("visible", True)
+                    route = msg.get("route", "/")
+                    title = msg.get("title", "")
+                    if tab_id in tabs_state:
+                        tabs_state[tab_id]["visible"] = visible
+                        tabs_state[tab_id]["title"] = title
+                        tabs_state[tab_id]["route"] = route
+                        tabs_state[tab_id]["lastAct"] = now_str
+                    action = "visible" if visible else "hidden"
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_visibility",
+                        "detail": f"Tab {action}: {route}",
+                    })
+                    if not visible:
+                        asyncio.create_task(_persist_log(
+                            session_id,
+                            f"Tab hidden — user switched away [{tab_id[:8]}]",
+                            "warning"
+                        ))
+
+                # ── Window focus/blur (user alt-tabbed to another app) ─────
+                elif evt == "TAB_FOCUS":
+                    if tab_id in tabs_state:
+                        tabs_state[tab_id]["focused"] = True
+                        tabs_state[tab_id]["lastAct"] = now_str
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_focus",
+                        "detail": f"Window focused [{tab_id[:8]}]",
+                    })
+
+                elif evt == "TAB_BLUR":
+                    if tab_id in tabs_state:
+                        tabs_state[tab_id]["focused"] = False
+                        tabs_state[tab_id]["lastAct"] = now_str
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_blur",
+                        "detail": f"Window lost focus [{tab_id[:8]}]",
+                    })
+                    asyncio.create_task(_persist_log(
+                        session_id,
+                        f"User alt-tabbed away [{tab_id[:8]}]",
+                        "info"
+                    ))
+
+                # ── Idle / Active ─────────────────────────────────────────
+                elif evt == "TAB_IDLE":
+                    if tab_id in tabs_state:
+                        tabs_state[tab_id]["idle"] = True
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_idle",
+                        "detail": f"Tab went idle (10s no interaction)",
+                    })
+                    asyncio.create_task(_persist_log(
+                        session_id,
+                        f"Tab idle >10s [{tab_id[:8]}]",
+                        "warning"
+                    ))
+
+                elif evt == "TAB_ACTIVE":
+                    if tab_id in tabs_state:
+                        tabs_state[tab_id]["idle"] = False
+                        tabs_state[tab_id]["lastAct"] = now_str
+                    client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id,
+                        "event": "tab_active",
+                        "detail": f"Tab became active again",
+                    })
+
+                # ── Page navigation ───────────────────────────────────────
+                elif evt == "PAGE_CHANGE":
+                    route = msg.get("route", "/")
+                    title = msg.get("title", "")
+                    if tab_id in tabs_state:
+                        old_route = tabs_state[tab_id].get("route", "/")
+                        tabs_state[tab_id]["route"] = route
+                        tabs_state[tab_id]["title"] = title
+                        tabs_state[tab_id]["lastAct"] = now_str
+                        if old_route != route:  # only log actual navigations
+                            client_activities.insert(0, {
+                                "time": now_str, "tabId": tab_id,
+                                "event": "page_change",
+                                "detail": f"{old_route} → {route}",
+                            })
+                            asyncio.create_task(_persist_log(
+                                session_id,
+                                f"Page nav: {old_route} → {route} [{tab_id[:8]}]",
+                                "info"
+                            ))
 
                 elif evt == "POLICY_UPDATE":
                     new_base = msg.get("baseTimeout", 120)
@@ -229,9 +369,12 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                         "id": nid, "type": "success",
                         "title": "Policies Deployed",
                         "message": f"Base timeout → {new_base}s",
-                        "time": _now(),
+                        "time": now_str,
                     })
                     asyncio.create_task(_persist_log(session_id, f"Policies updated — Base T/O: {new_base}s", "info"))
+
+                # Keep activities list at 30 entries
+                client_activities = client_activities[:30]
 
         except WebSocketDisconnect:
             pass
@@ -407,13 +550,15 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
             elapsed = int(now - session_start)
             elapsed_str = f"{elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
 
-            for tab in tabs:
-                if tab["active"]:
-                    tab["lastAct"] = _now()
+            for tab_id, tab in tabs_state.items():
+                if tab.get("focused") or tab.get("visible", True):
+                    tabs_state[tab_id]["lastAct"] = _now()
 
             txn_volume = sum(t.amount for t in cached_txns) // 100 if cached_txns else 0
 
             # ── 13. Build & send payload ──
+            # Convert tabs_state dict → list for the frontend
+            tabs_list = list(tabs_state.values())
             payload = {
                 "remaining": remaining,
                 "adaptedTimeout": adapted_timeout,
@@ -424,7 +569,7 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 "scrollPattern": scroll_pattern,
                 "clickPattern": click_pattern,
                 "dwellTime": dwell_time,
-                "tabs": tabs,
+                "tabs": tabs_list,
                 "sessionLog": cached_logs,
                 "riskFactors": risk_factors,
                 "transactions": cached_txn_dicts,
@@ -438,6 +583,8 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 "notifications": notifications[-5:],
                 "sessionElapsed": elapsed_str,
                 "txnVolume": txn_volume,
+                # Client activity feed — visible on the server dashboard
+                "clientActivities": client_activities[:20],
             }
             notifications = []
 
