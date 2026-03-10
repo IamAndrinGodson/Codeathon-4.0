@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic[email]
+sqlalchemy[asyncio]
+asyncpg
+alembic
+redis[hiredis]
+celery
+python-jose
+passlib[bcrypt]
+pyotp
+geoip2
+httpx
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-exporter-otlp-proto-grpc
