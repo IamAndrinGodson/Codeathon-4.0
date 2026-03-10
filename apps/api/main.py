@@ -21,6 +21,7 @@ except ImportError:
     OTEL_AVAILABLE = False
 
 from routers import session, risk, geo, events
+import ws_simulator
 
 app = FastAPI(
     title="NEXUS TLS Risk Engine",
@@ -44,6 +45,7 @@ app.include_router(session.router)
 app.include_router(risk.router)
 app.include_router(geo.router)
 app.include_router(events.router)
+app.include_router(ws_simulator.router)
 
 # Instrument with OpenTelemetry if available
 if OTEL_AVAILABLE:

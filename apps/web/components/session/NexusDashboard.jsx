@@ -533,6 +533,11 @@ export default function App() {
   // Map session logs to the format the UI expects
   const logs = session?.sessionLog?.map(l => ({ t: l.time, msg: l.msg, type: l.type })) ?? INIT_LOGS;
 
+  // Live data from WebSocket — with static fallbacks
+  const liveTxns = (session?.transactions?.length > 0) ? session.transactions : TXNS;
+  const liveTimeline = (session?.timeline?.length > 0) ? session.timeline : INIT_TIMELINE;
+  const wsConnected = session?.wsConnected ?? false;
+
   const extend = session?.extend ?? (() => { });
   const killTab = session?.killTab ?? (() => { });
   const logout = session?.logout ?? (() => { });
@@ -570,6 +575,20 @@ export default function App() {
         @keyframes orbFloat1 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(10vw, 15vh) scale(1.1); } }
         @keyframes orbFloat2 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-10vw, -15vh) scale(1.1); } }
         @keyframes gridMove { 0% { background-position: 0 0; } 100% { background-position: 50px 50px; } }
+        @keyframes staggerSlideUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes staggerScaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        @keyframes staggerSlideLeft { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes staggerSlideRight { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
+
+        .anim-panel { opacity: 0; animation-fill-mode: forwards; animation-timing-function: cubic-bezier(.4,0,.2,1); }
+        .anim-slide-up { animation-name: staggerSlideUp; animation-duration: .6s; }
+        .anim-scale-in { animation-name: staggerScaleIn; animation-duration: .6s; }
+        .anim-slide-left { animation-name: staggerSlideLeft; animation-duration: .6s; }
+        .anim-slide-right { animation-name: staggerSlideRight; animation-duration: .6s; }
+        .d0 { animation-delay: 0s; } .d1 { animation-delay: .1s; } .d2 { animation-delay: .2s; }
+        .d3 { animation-delay: .3s; } .d4 { animation-delay: .4s; } .d5 { animation-delay: .5s; }
+        .d6 { animation-delay: .6s; } .d7 { animation-delay: .7s; } .d8 { animation-delay: .8s; }
+        .d9 { animation-delay: .9s; } .d10 { animation-delay: 1s; }
 
         .vnav-btn{background:none;border:none;cursor:pointer;padding:8px 18px;border-radius:8px;font-family:'Syne',sans-serif;font-size:11px;letter-spacing:1.5px;transition:all .2s;white-space:nowrap;}
         .vnav-btn.on{background:#111111;color:#00e5a0;box-shadow: 0 0 15px #00e5a011;}
@@ -612,6 +631,11 @@ export default function App() {
 
           {/* Session strip */}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* LIVE / SIMULATED badge */}
+            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 12px", borderRadius: 20, background: wsConnected ? "#00e5a012" : "#f5c51812", border: `1px solid ${wsConnected ? "#00e5a044" : "#f5c51844"}`, transition: "all .4s" }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: wsConnected ? "#00e5a0" : "#f5c518", display: "inline-block", boxShadow: wsConnected ? "0 0 8px #00e5a088" : "0 0 8px #f5c51888", animation: wsConnected ? "ping 1.5s ease-out infinite" : "none" }} />
+              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: 2, color: wsConnected ? "#00e5a0" : "#f5c518", fontFamily: "'JetBrains Mono',monospace" }}>{wsConnected ? "LIVE" : "SIMULATED"}</span>
+            </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 14px", background: "#000000", border: `1px solid ${tc}55`, borderRadius: 20, transition: "border-color .4s", boxShadow: `0 0 15px ${tc}11` }}>
               <Dot c={tc} pulse />
               <span style={{ fontSize: 9, color: "#555555", letterSpacing: 2 }}>SESSION</span>
@@ -644,7 +668,7 @@ export default function App() {
                 {/* LEFT */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                   {/* Ring */}
-                  <div style={{ background: "linear-gradient(180deg,#050505,#000000)", border: `1px solid ${tc}22`, borderRadius: 14, padding: "20px", textAlign: "center", transition: "all .4s", boxShadow: `0 0 40px ${tc}0a` }}>
+                  <div className="anim-panel anim-scale-in d0" style={{ background: "linear-gradient(180deg,#050505,#000000)", border: `1px solid ${tc}22`, borderRadius: 14, padding: "20px", textAlign: "center", transition: "all .4s", boxShadow: `0 0 40px ${tc}0a` }}>
                     <div style={{ fontSize: 8, letterSpacing: 3, color: "#555", marginBottom: 12 }}>SESSION INTEGRITY</div>
                     <RingTimer remaining={remaining} total={BASE_TIMEOUT} warn={warn} crit={crit} />
                     <div style={{ marginTop: 12, display: "flex", justifyContent: "space-around" }}>
@@ -657,10 +681,12 @@ export default function App() {
                     </div>
                   </div>
 
-                  <BiometricsPanel trustScore={trustScore} mouseVel={mouseVel} keystrokeRhythm={keystroke} scrollPattern={scrollPat} />
+                  <div className="anim-panel anim-slide-up d1">
+                    <BiometricsPanel trustScore={trustScore} mouseVel={mouseVel} keystrokeRhythm={keystroke} scrollPattern={scrollPat} />
+                  </div>
 
                   {/* Policies */}
-                  <div style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, padding: "18px" }}>
+                  <div className="anim-panel anim-slide-up d2" style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, padding: "18px" }}>
                     <div style={{ fontSize: 8, letterSpacing: 3, color: "#3a5070", marginBottom: 12 }}>SESSION POLICIES</div>
                     <Pill label="Base Timeout" val="2:00" c="#00e5a0" />
                     <Pill label="Adapted Timeout" val="1:15" c="#f5c518" />
@@ -679,11 +705,11 @@ export default function App() {
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
                     {[
                       { l: "Trust Score", v: `${trustScore}`, sub: "biometric", c: "#a78bfa" },
-                      { l: "Transactions", v: "5", sub: "this session", c: "#00e5a0" },
+                      { l: "Transactions", v: `${liveTxns.length}`, sub: "this session", c: "#00e5a0" },
                       { l: "Active Tabs", v: `${tabs.length}`, sub: "monitored", c: "#00c8b0" },
                       { l: "Threats", v: "0", sub: "detected", c: "#00e5a0" },
-                    ].map(s => (
-                      <div key={s.l} style={{ background: "#0a1520", border: `1px solid ${s.c}22`, borderRadius: 12, padding: "14px 16px" }}>
+                    ].map((s, i) => (
+                      <div className={`anim-panel anim-slide-up d${i + 3}`} key={s.l} style={{ background: "#0a1520", border: `1px solid ${s.c}22`, borderRadius: 12, padding: "14px 16px" }}>
                         <div style={{ fontSize: 24, fontWeight: 800, color: s.c, fontFamily: "'JetBrains Mono',monospace", marginBottom: 2 }}>{s.v}</div>
                         <div style={{ fontSize: 9, color: "#3a5070", letterSpacing: 1 }}>{s.l.toUpperCase()}</div>
                         <div style={{ fontSize: 8, color: "#2a4060", marginTop: 3 }}>{s.sub}</div>
@@ -692,19 +718,23 @@ export default function App() {
                   </div>
 
                   {/* Risk Adaptive + Cross-Tab side by side */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                  <div className="anim-panel anim-scale-in d5" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                     <RiskAdaptivePanel riskLevel={riskLevel} adaptedTimeout={adaptedTimeout} baseTimeout={BASE_TIMEOUT} factors={riskFactors} />
                     <CrossTabPanel tabs={tabs} onKillTab={killTab} />
                   </div>
 
                   {/* Replay timeline */}
-                  <ReplayTimeline events={INIT_TIMELINE} scrub={scrub} onScrub={setScrub} />
+                  <div className="anim-panel anim-slide-left d6">
+                    <ReplayTimeline events={liveTimeline} scrub={scrub} onScrub={setScrub} />
+                  </div>
 
                   {/* Geo map */}
-                  <GeoFenceMap threatLevel="CLEAR" />
+                  <div className="anim-panel anim-slide-right d7">
+                    <GeoFenceMap threatLevel="CLEAR" />
+                  </div>
 
                   {/* Transactions table */}
-                  <div style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, overflow: "hidden" }}>
+                  <div className="anim-panel anim-slide-up d8" style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, overflow: "hidden" }}>
                     <div style={{ padding: "12px 16px", borderBottom: "1px solid #1e2d45", fontSize: 8, letterSpacing: 3, color: "#3a5070" }}>LIVE TRANSACTIONS</div>
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead>
@@ -715,7 +745,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {TXNS.map((t, i) => (
+                        {liveTxns.map((t, i) => (
                           <tr key={t.id} style={{ borderBottom: "1px solid #1e2d4522", background: i % 2 ? "transparent" : "#060d1a" }}>
                             <td style={{ padding: "9px 14px", fontFamily: "monospace", fontSize: 11, color: "#00e5a0" }}>{t.id}</td>
                             <td style={{ padding: "9px 14px", fontSize: 11, color: "#7a9ab0" }}>{t.type}</td>
@@ -730,7 +760,7 @@ export default function App() {
                   </div>
 
                   {/* Session log */}
-                  <div style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, padding: "16px" }}>
+                  <div className="anim-panel anim-slide-up d9" style={{ background: "#0a1520", border: "1px solid #1e2d45", borderRadius: 14, padding: "16px" }}>
                     <div style={{ fontSize: 8, letterSpacing: 3, color: "#3a5070", marginBottom: 12 }}>SESSION AUDIT LOG</div>
                     {logs.map((l, i) => {
                       const c = l.type === "success" ? "#00e5a0" : l.type === "warn" ? "#f5c518" : "#4a6080";

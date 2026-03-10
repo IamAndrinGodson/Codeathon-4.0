@@ -1,4 +1,4 @@
-// components/session/SessionProvider.tsx — Core session context with timer, biometrics, broadcast
+// components/session/SessionProvider.tsx — Core session context with WS, timer, biometrics, broadcast
 "use client";
 
 import {
@@ -16,6 +16,8 @@ const WARN_AT = 30;
 const HEARTBEAT_INTERVAL = 15_000;
 const ACTIVITY_DEBOUNCE = 1_500;
 const BIOMETRIC_INTERVAL = 10_000;
+const WS_URL = "ws://localhost:8000/ws/session/demo";
+const WS_RECONNECT_DELAY = 3_000;
 
 const ACTIVITY_EVENTS = [
     "mousemove",
@@ -47,6 +49,23 @@ export interface RiskFactor {
     delta: number;
 }
 
+export interface Transaction {
+    id: string;
+    type: string;
+    amount: string;
+    risk: string;
+    status: string;
+    route: string;
+    time: string;
+}
+
+export interface TimelineEvent {
+    pct: number;
+    label: string;
+    icon: string;
+    type: string;
+}
+
 interface SessionState {
     remaining: number;
     adaptedTimeout: number;
@@ -60,6 +79,9 @@ interface SessionState {
     tabs: TabInfo[];
     sessionLog: SessionEvent[];
     riskFactors: RiskFactor[];
+    transactions: Transaction[];
+    timeline: TimelineEvent[];
+    wsConnected: boolean;
     extend: () => void;
     killTab: (tabId: string) => void;
     logout: () => void;
@@ -84,21 +106,101 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const [sessionLog, setSessionLog] = useState<SessionEvent[]>([
         { time: new Date().toTimeString().slice(0, 8), msg: "Session opened — NEXUS TLS v2", type: "success" },
     ]);
+    const [transactions, setTransactions] = useState<Transaction[]>([]);
+    const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
+    const [wsConnected, setWsConnected] = useState(false);
 
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const workerRef = useRef<Worker | null>(null);
     const broadcastRef = useRef<BroadcastChannel | null>(null);
+    const wsRef = useRef<WebSocket | null>(null);
+    const wsReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const addLog = useCallback((msg: string, type: string) => {
         const t = new Date().toTimeString().slice(0, 8);
         setSessionLog((prev) => [{ time: t, msg, type }, ...prev.slice(0, 19)]);
     }, []);
 
-    // ── Activity detection ──
+    // ── WebSocket connection to backend simulator ──
+    const connectWs = useCallback(() => {
+        try {
+            const ws = new WebSocket(WS_URL);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                setWsConnected(true);
+                console.log("[NEXUS WS] Connected to backend simulator");
+                // Announce this tab
+                ws.send(JSON.stringify({
+                    type: "TAB_OPEN",
+                    tabId: "tab-1",
+                    title: document.title || "Dashboard",
+                    route: window.location.pathname,
+                }));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    // Update all state from the backend payload
+                    if (data.remaining !== undefined) setRemaining(data.remaining);
+                    if (data.adaptedTimeout !== undefined) setAdaptedTimeout(data.adaptedTimeout);
+                    if (data.riskLevel) setRiskLevel(data.riskLevel);
+                    if (data.biometricScore !== undefined) setBiometricScore(data.biometricScore);
+                    if (data.keystrokeRhythm !== undefined) setKeystrokeRhythm(data.keystrokeRhythm);
+                    if (data.mouseVelocity !== undefined) setMouseVelocity(data.mouseVelocity);
+                    if (data.scrollPattern !== undefined) setScrollPattern(data.scrollPattern);
+                    if (data.showWarning !== undefined) setShowWarning(data.showWarning);
+                    if (data.isActive !== undefined) setIsActive(data.isActive);
+                    if (data.tabs) setTabs(data.tabs);
+                    if (data.sessionLog) setSessionLog(data.sessionLog);
+                    if (data.riskFactors) setRiskFactors(data.riskFactors);
+                    if (data.transactions) setTransactions(data.transactions);
+                    if (data.timeline) setTimeline(data.timeline);
+                } catch (e) {
+                    console.error("[NEXUS WS] Failed to parse message", e);
+                }
+            };
+
+            ws.onclose = () => {
+                setWsConnected(false);
+                console.log("[NEXUS WS] Disconnected — will retry in", WS_RECONNECT_DELAY, "ms");
+                // Reconnect after delay
+                wsReconnectRef.current = setTimeout(connectWs, WS_RECONNECT_DELAY);
+            };
+
+            ws.onerror = () => {
+                // onclose will fire after this, which handles reconnect
+                setWsConnected(false);
+            };
+        } catch {
+            console.warn("[NEXUS WS] WebSocket not available — falling back to simulation");
+            setWsConnected(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        connectWs();
+        return () => {
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
+            if (wsReconnectRef.current) {
+                clearTimeout(wsReconnectRef.current);
+            }
+        };
+    }, [connectWs]);
+
+    // ── Activity detection (also forwards telemetry to WS) ──
     const resetTimer = useCallback(() => {
-        setRemaining(adaptedTimeout > 0 ? adaptedTimeout : BASE_TIMEOUT);
-        setShowWarning(false);
+        // Only reset timer locally if NOT connected to WS (WS drives the timer)
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+            setRemaining(adaptedTimeout > 0 ? adaptedTimeout : BASE_TIMEOUT);
+            setShowWarning(false);
+        }
         setIsActive(true);
     }, [adaptedTimeout]);
 
@@ -107,7 +209,25 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             if (debounceRef.current) clearTimeout(debounceRef.current);
             debounceRef.current = setTimeout(resetTimer, ACTIVITY_DEBOUNCE);
 
-            // Forward raw events to the biometrics Web Worker
+            // Forward telemetry to WebSocket if connected
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                if (ev.type === "mousemove") {
+                    const me = ev as MouseEvent;
+                    wsRef.current.send(JSON.stringify({
+                        type: "mousemove",
+                        x: me.clientX,
+                        y: me.clientY,
+                        timestamp: Date.now(),
+                    }));
+                } else if (ev.type === "keydown") {
+                    wsRef.current.send(JSON.stringify({
+                        type: "keydown",
+                        timestamp: Date.now(),
+                    }));
+                }
+            }
+
+            // Forward raw events to the biometrics Web Worker (fallback)
             if (workerRef.current) {
                 if (ev.type === "keydown") {
                     workerRef.current.postMessage({ type: "KEYDOWN", data: { timestamp: Date.now() } });
@@ -126,8 +246,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, handler));
     }, [resetTimer]);
 
-    // ── Countdown tick ──
+    // ── Countdown tick (only active when WS is NOT connected) ──
     useEffect(() => {
+        if (wsConnected) return; // WS drives the countdown
+
         timerRef.current = setInterval(() => {
             setRemaining((prev) => {
                 if (prev <= 1) {
@@ -141,10 +263,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
         };
-    }, []);
+    }, [wsConnected]);
 
-    // ── Heartbeat to backend (every 15s) ──
+    // ── Heartbeat to backend (only when WS is NOT connected) ──
     useEffect(() => {
+        if (wsConnected) return; // WS replaces heartbeat
+
         const ping = async () => {
             try {
                 const res = await fetch("/api/session/heartbeat", { method: "POST" });
@@ -166,24 +290,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ping();
         const interval = setInterval(ping, HEARTBEAT_INTERVAL);
         return () => clearInterval(interval);
-    }, []);
+    }, [wsConnected]);
 
-    // ── Biometrics Web Worker ──
+    // ── Biometrics Web Worker (only when WS is NOT connected) ──
     useEffect(() => {
+        if (wsConnected) return; // WS drives biometric scores
+
         try {
             workerRef.current = new Worker(
                 new URL("../../lib/biometrics.worker.ts", import.meta.url)
             );
             workerRef.current.onmessage = async (e) => {
                 if (e.data.type === "REQUEST_SCORE") {
-                    // Worker is asking us to send COMPUTE_SCORE
                     workerRef.current?.postMessage({ type: "COMPUTE_SCORE" });
                     return;
                 }
                 const { score } = e.data;
                 if (score !== undefined) {
                     setBiometricScore(score);
-                    // Simulate sub-scores with realistic variance
                     setKeystrokeRhythm(Math.max(50, Math.min(99, score + Math.round((Math.random() - 0.5) * 12))));
                     setMouseVelocity(Math.max(50, Math.min(99, score + Math.round((Math.random() - 0.5) * 16))));
                     setScrollPattern(Math.max(50, Math.min(99, score + Math.round((Math.random() - 0.5) * 10))));
@@ -202,7 +326,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             return () => clearInterval(interval);
         }
         return () => workerRef.current?.terminate();
-    }, []);
+    }, [wsConnected]);
 
     // ── BroadcastChannel (cross-tab) ──
     useEffect(() => {
@@ -225,6 +349,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                             lastAct: new Date().toTimeString().slice(0, 8),
                         }];
                     });
+                    // Also notify WS backend of the new tab
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                            type: "TAB_OPEN",
+                            tabId: e.data.tabId,
+                            title: e.data.title,
+                            route: e.data.route,
+                        }));
+                    }
                 }
             };
 
@@ -244,7 +377,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     const extend = useCallback(async () => {
         resetTimer();
-        await fetch("/api/session/extend", { method: "POST" });
+        // Notify WS backend to reset timer
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "EXTEND" }));
+        }
+        await fetch("/api/session/extend", { method: "POST" }).catch(() => { });
         broadcastRef.current?.postMessage({ type: "EXTEND" });
         addLog("Session extended by user", "success");
     }, [resetTimer, addLog]);
@@ -255,6 +392,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 () => { }
             );
             setTabs((prev) => prev.filter((t) => t.id !== tabId));
+            // Notify WS backend
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: "TAB_CLOSE", tabId }));
+            }
             addLog(`Tab killed: ${tabId}`, "warn");
         },
         [addLog]
@@ -263,6 +404,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const handleLogout = useCallback(() => {
         broadcastRef.current?.postMessage({ type: "LOGOUT" });
         if (timerRef.current) clearInterval(timerRef.current);
+        if (wsRef.current) wsRef.current.close();
         window.location.href = "/auth/logout-summary";
     }, []);
 
@@ -281,6 +423,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                 tabs,
                 sessionLog,
                 riskFactors,
+                transactions,
+                timeline,
+                wsConnected,
                 extend,
                 killTab,
                 logout: handleLogout,
