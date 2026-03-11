@@ -270,7 +270,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
                     // All values are applied in a single React render cycle
                     // to prevent the re-render storm that causes flickering.
                     if (data.expiresAt !== undefined) setExpiresAt(data.expiresAt);
-                    if (data.remaining !== undefined) setRemaining(data.remaining);
+                    // intentionally ignoring data.remaining to prevent flickering against rAF loop
                     if (data.adaptedTimeout !== undefined) setAdaptedTimeout(data.adaptedTimeout);
                     if (data.riskLevel) setRiskLevel(data.riskLevel);
                     if (data.showWarning !== undefined) setShowWarning(data.showWarning);

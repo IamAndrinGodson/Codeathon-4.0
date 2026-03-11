@@ -19,9 +19,25 @@ export default function DashboardPage() {
     const [mounted, setMounted] = useState(false);
 
     useEffect(() => {
-        // Use environment variable, but fallback to port 3000 for local double-server dev
-        const isLocalAdmin = window.location.port === "3000" || (window.location.port === "3002" && process.env.NEXT_PUBLIC_IS_SERVER === "true");
-        const shouldBeAdmin = isLocalAdmin || process.env.NEXT_PUBLIC_IS_SERVER === "true";
+        // Explicit logic for rendering Admin vs Client Dashboard
+        // 1. If accessing via localhost:3000, it's the Admin Dashboard
+        // 2. If accessing via Ngrok, localtunnel, or localhost:3002, it's the Client Dashboard
+        
+        const host = window.location.host;
+        const port = window.location.port;
+
+        // Force Admin ONLY if explicitly opened on localhost port 3000
+        const isLocalAdmin = port === "3000";
+        
+        // Check if NEXT_PUBLIC_IS_SERVER is true in .env, BUT if we are on an external ngrok URL,
+        // we override and force Client mode. This prevents the server from serving Admin 
+        // to public endpoints just because the .env file says `true` for the host machine.
+        const isNgrok = host.includes("ngrok") || host.includes("loca.lt") || host.includes("serveo.net");
+        
+        const envAdmin = process.env.NEXT_PUBLIC_IS_SERVER === "true";
+        
+        const shouldBeAdmin = isLocalAdmin || (envAdmin && !isNgrok && port !== "3002");
+        
         setIsAdmin(shouldBeAdmin);
         setMounted(true);
     }, []);
