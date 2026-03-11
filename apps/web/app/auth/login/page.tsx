@@ -27,8 +27,8 @@ export default function LoginPage() {
             });
 
             if (result?.error) {
-                if (result.error === "INVALID_TOTP") {
-                    setError("Invalid TOTP code. Please try again.");
+                if (result.error === "TOTP_REQUIRED" || result.error === "CredentialsSignin") {
+                    setError("Two-factor authentication required.");
                     setShowTotp(true);
                 } else {
                     setError("Invalid email or password.");

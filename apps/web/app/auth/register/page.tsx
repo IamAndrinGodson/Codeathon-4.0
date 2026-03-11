@@ -26,7 +26,10 @@ export default function RegisterPage() {
         try {
             const res = await fetch("/api/backend/api/auth/register", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    "ngrok-skip-browser-warning": "1",
+                },
                 body: JSON.stringify({
                     email,
                     password,
@@ -46,7 +49,17 @@ export default function RegisterPage() {
             const data = await res.json();
 
             if (!res.ok) {
-                setError(data.detail || `Registration failed (${res.status}).`);
+                let errorMsg = `Registration failed (${res.status}).`;
+                if (data.detail) {
+                    if (typeof data.detail === "string") {
+                        errorMsg = data.detail;
+                    } else if (Array.isArray(data.detail)) {
+                        errorMsg = data.detail.map((err: any) => err.msg || JSON.stringify(err)).join(", ");
+                    } else {
+                        errorMsg = JSON.stringify(data.detail);
+                    }
+                }
+                setError(errorMsg);
             } else {
                 setSuccess(true);
                 setTimeout(() => {

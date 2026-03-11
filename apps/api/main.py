@@ -40,7 +40,7 @@ try:
 except ImportError:
     OTEL_AVAILABLE = False
 
-from routers import auth, session, risk, geo, events
+from routers import auth, session, risk, geo, events, admin
 import ws_simulator
 import ws_engine
 import database
@@ -64,10 +64,15 @@ app = FastAPI(
 )
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-cors_origins = os.getenv("CORS_ORIGINS", '["http://localhost:3000"]')
+# Use allow_origin_regex to also accept Ngrok tunnel domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=json.loads(cors_origins),
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3002",
+        "http://localhost:8000",
+    ],
+    allow_origin_regex=r"https?://.*\.ngrok(-free)?\.dev|https?://.*\.ngrok\.io",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -79,6 +84,7 @@ app.include_router(session.router)      # /api/session/*
 app.include_router(risk.router)         # /api/risk/*
 app.include_router(geo.router)          # /api/geo/*
 app.include_router(events.router)       # /api/events/*
+app.include_router(admin.router)        # /api/admin/*
 app.include_router(ws_simulator.router) # /ws/session/sim/*
 app.include_router(ws_engine.router)    # /ws/session/real/*
 
@@ -136,6 +142,12 @@ async def api_info():
                 "POST /api/events/ingest",
                 "GET  /api/events/timeline/{session_id}",
                 "GET  /api/events/stats",
+            ],
+            "admin": [
+                "GET  /api/admin/sessions",
+                "GET  /api/admin/users",
+                "POST /api/admin/sessions/{session_id}/kill",
+                "GET  /api/admin/dashboard-stats",
             ],
             "websocket": [
                 "WS /ws/session/real/{session_id}",

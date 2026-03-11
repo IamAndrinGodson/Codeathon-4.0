@@ -27,6 +27,21 @@ THREAT_TYPES = [
 MERCHANTS = ["Amazon Pay", "PhonePe", "Razorpay", "Stripe India", "PayTM", "HDFC NetBanking", "ICICI Direct"]
 ROUTES = ["BLR→MUM", "DEL→HYD", "CHN→PNQ", "KOL→GOA", "BLR→DEL", "MUM→CHN"]
 
+# ── GLOBAL shared state (visible to ALL WebSocket sessions) ──
+# These are module-level so the server admin dashboard can see all client events.
+global_client_activities: list = []   # Rolling log of the last 50 client events
+global_tabs_state: dict = {}          # {tabId: {id, title, route, visible, focused, idle, lastAct}}
+global_connections: set = set()       # All active WebSocket connections
+
+global_system_stats = {
+    "uptime": 99.98,
+    "activeSessions": random.randint(148, 210),
+    "avgTrustScore": 91.0,
+    "p95Latency": round(random.uniform(12, 22), 1),
+    "totalRequests": random.randint(40000, 80000),
+    "blockedThreats": random.randint(18, 40),
+}
+
 def _now():
     return datetime.now(timezone.utc).strftime("%H:%M:%S")
 
@@ -123,17 +138,18 @@ async def _ensure_session(session_id: str):
 
 @router.websocket("/ws/session/real/{session_id}")
 async def websocket_real_engine(websocket: WebSocket, session_id: str):
-    print(f"\n[WS_ENGINE] => CLIENT CONNECTED TO REAL ENGINE: {session_id}\n", flush=True)
+    client_ip = websocket.client.host if websocket.client else "Unknown"
+    print(f"\n[WS_ENGINE] => CLIENT CONNECTED TO REAL ENGINE: {session_id} from {client_ip}\n", flush=True)
     await websocket.accept()
+    global_connections.add(websocket)
 
     try:
         init_trust, base_timeout = await _ensure_session(session_id)
         print(f"[WS_ENGINE] Session initialized: trust={init_trust}, timeout={base_timeout}", flush=True)
     except Exception as e:
         import traceback
-        with open("C:/tmp/ws_crash.log", "w") as f:
-            f.write(f"FATAL: _ensure_session crashed: {e}\n")
-            traceback.print_exc(file=f)
+        import logging
+        logging.getLogger(__name__).exception(f"FATAL: _ensure_session crashed: {e}")
         await websocket.close()
         return
 
@@ -155,9 +171,9 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
     session_start = time.time()
 
     trust_history = [trust_score] * 5
-    # tabs dict: id → rich state
-    tabs_state: dict = {}   # {tabId: {id, title, route, visible, focused, idle, lastAct}}
-    tab_count = 0
+    # Use the GLOBAL shared state for client tabs and activities
+    global global_tabs_state, global_client_activities
+    tab_count = len(global_tabs_state)
     threats = []
     notifications = []
     nid = 0
@@ -165,28 +181,20 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
     tick = 0
     txn_counter = 0
     is_geo_anomaly = False
-    # Rolling client activity log (last 30 real events from browser)
-    client_activities: list = []
+    is_admin = False
 
     # Cached DB results (refreshed every few ticks)
     cached_logs = []
     cached_txns = []
     cached_txn_dicts = []
 
-    system_stats = {
-        "uptime": 99.98,
-        "activeSessions": random.randint(148, 210),
-        "avgTrustScore": float(trust_score),
-        "p95Latency": round(random.uniform(12, 22), 1),
-        "totalRequests": random.randint(40000, 80000),
-        "blockedThreats": random.randint(18, 40),
-    }
+
 
     # ── Telemetry receiver ──
     async def receive_telemetry():
         nonlocal last_mouse, last_key, trust_score, remaining, adapted_timeout
         nonlocal tab_count, nid, notifications, base_timeout
-        nonlocal tabs_state, client_activities
+        global global_tabs_state, global_client_activities
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -222,6 +230,33 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     })
                     asyncio.create_task(_persist_log(session_id, "User extended session", "success"))
 
+                elif evt == "LOGOUT":
+                    asyncio.create_task(_persist_session(session_id, status="LOGGED_OUT"))
+                    asyncio.create_task(_persist_log(session_id, "User requested logout", "info"))
+                    try:
+                        await websocket.send_text(json.dumps({"forceLogout": True}))
+                    except Exception:
+                        pass
+                    return  # exit receive_telemetry
+
+                elif evt == "ADMIN_CONNECT":
+                    is_admin = True
+                    # Admin dashboard connected — no client tab tracking needed
+
+                elif evt == "ADMIN_KILL_SESSION":
+                    if is_admin:
+                        asyncio.create_task(_persist_log(session_id, f"ADMIN INITIATED SECURE FORCE KILL FOR ALL CLIENTS", "danger"))
+                        global_client_activities.insert(0, {
+                            "time": now_str, "tabId": "ADMIN", "ip": client_ip,
+                            "event": "tab_close",
+                            "detail": "ADMIN INITIATED FORCE LOGOUT ALL CLIENTS",
+                        })
+                        for conn in list(global_connections):
+                            try:
+                                await conn.send_text(json.dumps({"forceLogout": True}))
+                            except Exception:
+                                pass
+
                 elif evt == "ACTIVITY":
                     last_mouse = time.time()
                     last_key = time.time()
@@ -229,8 +264,9 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 # ── Tab lifecycle ──────────────────────────────────────────
                 elif evt == "TAB_OPEN":
                     tab_count += 1
-                    tabs_state[tab_id] = {
+                    global_tabs_state[tab_id] = {
                         "id": tab_id,
+                        "ip": client_ip,
                         "title": msg.get("title", f"Tab {tab_count}"),
                         "route": msg.get("route", "/"),
                         "visible": msg.get("visible", True),
@@ -238,11 +274,12 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                         "idle": False,
                         "lastAct": now_str,
                     }
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_open",
                         "detail": f"Opened: {msg.get('route', '/')} — {msg.get('title', 'Tab')}",
                     })
+                    global_client_activities = global_client_activities[:50]
                     asyncio.create_task(_persist_log(
                         session_id,
                         f"Tab opened: {msg.get('route', '/')} [{tab_id[:8]}]",
@@ -250,12 +287,12 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     ))
 
                 elif evt == "TAB_CLOSE":
-                    if tab_id in tabs_state:
-                        route = tabs_state[tab_id].get("route", "/")
-                        del tabs_state[tab_id]
+                    if tab_id in global_tabs_state:
+                        route = global_tabs_state[tab_id].get("route", "/")
+                        del global_tabs_state[tab_id]
                         tab_count = max(0, tab_count - 1)
-                        client_activities.insert(0, {
-                            "time": now_str, "tabId": tab_id,
+                        global_client_activities.insert(0, {
+                            "time": now_str, "tabId": tab_id, "ip": client_ip,
                             "event": "tab_close",
                             "detail": f"Closed tab: {route} [{tab_id[:8]}]",
                         })
@@ -270,14 +307,14 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     visible = msg.get("visible", True)
                     route = msg.get("route", "/")
                     title = msg.get("title", "")
-                    if tab_id in tabs_state:
-                        tabs_state[tab_id]["visible"] = visible
-                        tabs_state[tab_id]["title"] = title
-                        tabs_state[tab_id]["route"] = route
-                        tabs_state[tab_id]["lastAct"] = now_str
+                    if tab_id in global_tabs_state:
+                        global_tabs_state[tab_id]["visible"] = visible
+                        global_tabs_state[tab_id]["title"] = title
+                        global_tabs_state[tab_id]["route"] = route
+                        global_tabs_state[tab_id]["lastAct"] = now_str
                     action = "visible" if visible else "hidden"
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_visibility",
                         "detail": f"Tab {action}: {route}",
                     })
@@ -290,21 +327,21 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
 
                 # ── Window focus/blur (user alt-tabbed to another app) ─────
                 elif evt == "TAB_FOCUS":
-                    if tab_id in tabs_state:
-                        tabs_state[tab_id]["focused"] = True
-                        tabs_state[tab_id]["lastAct"] = now_str
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    if tab_id in global_tabs_state:
+                        global_tabs_state[tab_id]["focused"] = True
+                        global_tabs_state[tab_id]["lastAct"] = now_str
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_focus",
                         "detail": f"Window focused [{tab_id[:8]}]",
                     })
 
                 elif evt == "TAB_BLUR":
-                    if tab_id in tabs_state:
-                        tabs_state[tab_id]["focused"] = False
-                        tabs_state[tab_id]["lastAct"] = now_str
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    if tab_id in global_tabs_state:
+                        global_tabs_state[tab_id]["focused"] = False
+                        global_tabs_state[tab_id]["lastAct"] = now_str
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_blur",
                         "detail": f"Window lost focus [{tab_id[:8]}]",
                     })
@@ -316,10 +353,10 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
 
                 # ── Idle / Active ─────────────────────────────────────────
                 elif evt == "TAB_IDLE":
-                    if tab_id in tabs_state:
-                        tabs_state[tab_id]["idle"] = True
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    if tab_id in global_tabs_state:
+                        global_tabs_state[tab_id]["idle"] = True
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_idle",
                         "detail": f"Tab went idle (10s no interaction)",
                     })
@@ -330,11 +367,11 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     ))
 
                 elif evt == "TAB_ACTIVE":
-                    if tab_id in tabs_state:
-                        tabs_state[tab_id]["idle"] = False
-                        tabs_state[tab_id]["lastAct"] = now_str
-                    client_activities.insert(0, {
-                        "time": now_str, "tabId": tab_id,
+                    if tab_id in global_tabs_state:
+                        global_tabs_state[tab_id]["idle"] = False
+                        global_tabs_state[tab_id]["lastAct"] = now_str
+                    global_client_activities.insert(0, {
+                        "time": now_str, "tabId": tab_id, "ip": client_ip,
                         "event": "tab_active",
                         "detail": f"Tab became active again",
                     })
@@ -343,14 +380,14 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 elif evt == "PAGE_CHANGE":
                     route = msg.get("route", "/")
                     title = msg.get("title", "")
-                    if tab_id in tabs_state:
-                        old_route = tabs_state[tab_id].get("route", "/")
-                        tabs_state[tab_id]["route"] = route
-                        tabs_state[tab_id]["title"] = title
-                        tabs_state[tab_id]["lastAct"] = now_str
+                    if tab_id in global_tabs_state:
+                        old_route = global_tabs_state[tab_id].get("route", "/")
+                        global_tabs_state[tab_id]["route"] = route
+                        global_tabs_state[tab_id]["title"] = title
+                        global_tabs_state[tab_id]["lastAct"] = now_str
                         if old_route != route:  # only log actual navigations
-                            client_activities.insert(0, {
-                                "time": now_str, "tabId": tab_id,
+                            global_client_activities.insert(0, {
+                                "time": now_str, "tabId": tab_id, "ip": client_ip,
                                 "event": "page_change",
                                 "detail": f"{old_route} → {route}",
                             })
@@ -374,7 +411,7 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                     asyncio.create_task(_persist_log(session_id, f"Policies updated — Base T/O: {new_base}s", "info"))
 
                 # Keep activities list at 30 entries
-                client_activities = client_activities[:30]
+                global_client_activities = global_client_activities[:30]
 
         except WebSocketDisconnect:
             pass
@@ -389,32 +426,35 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
             await asyncio.sleep(1)
             tick += 1
             now = time.time()
+            was_active = min(now - last_mouse, now - last_key) < 2  # previous state
 
-            # ── 1. Trust score — driven by activity freshness ──
+            # ── 1. Trust score — driven by activity freshness (NO randomness) ──
             mouse_idle = now - last_mouse
             key_idle = now - last_key
             min_idle = min(mouse_idle, key_idle)
 
-            if min_idle > 20:
+            if is_admin:
+                trust_score = 100
+            elif min_idle > 20:
                 trust_score = max(30, trust_score - 3)
             elif min_idle > 12:
                 trust_score = max(40, trust_score - 2)
             elif min_idle > 6:
-                trust_score = max(50, trust_score + random.choice([-1, -1, 0]))
+                trust_score = max(50, trust_score - 1)
             elif min_idle < 2:
-                trust_score = min(95, trust_score + random.choice([0, 1, 1, 2]))
+                trust_score = min(95, trust_score + 1)
             else:
-                trust_score = max(55, min(95, trust_score + random.choice([-1, 0, 0, 1])))
+                trust_score = trust_score  # hold steady
 
-            # Natural jitter so graph always moves
-            trust_score = max(30, min(98, trust_score + random.choice([-1, 0, 0, 0, 1])))
+            # Trust score stabilized — no artificial jitter
 
             # ── 2. Sub-scores follow trust ──
-            keystroke_rhythm = max(50, min(100, trust_score + random.randint(-6, 6)))
-            mouse_velocity   = max(50, min(100, trust_score + random.randint(-8, 8)))
-            scroll_pattern   = max(50, min(100, trust_score + random.randint(-4, 4)))
-            click_pattern    = max(50, min(100, trust_score + random.randint(-3, 5)))
-            dwell_time       = max(55, min(100, trust_score + random.randint(-3, 6)))
+            # Removed random jitter to prevent UI twitching; sub-scores now stable
+            keystroke_rhythm = max(50, min(100, trust_score - 3))
+            mouse_velocity = max(50, min(100, trust_score - 9))
+            scroll_pattern = max(50, min(100, trust_score - 12))
+            click_pattern = max(50, min(100, trust_score - 5))
+            dwell_time = max(50, min(100, trust_score + 1))
 
             trust_history.append(trust_score)
             if len(trust_history) > 30:
@@ -440,11 +480,16 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 risk_factors = res.active_factors
 
             # ── 4. Countdown (1 per second) ──
-            if min_idle < 2:
+            currently_active = min_idle < 2
+            if is_admin:
                 remaining = adapted_timeout
-            else:
+            elif currently_active and not was_active:
+                # User just came back from idle — reset timer once
+                remaining = adapted_timeout
+            elif not currently_active:
                 remaining = max(0, remaining - 1)
-            
+            # else: currently active and was already active — hold remaining steady
+
             if remaining > adapted_timeout:
                 remaining = adapted_timeout
             if remaining <= 0:
@@ -470,97 +515,27 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 except Exception:
                     pass
 
-            # ── 6. Generate transactions (every 15s) ──
-            if tick % 15 == 0:
-                txn_counter += 1
-                is_high = random.random() < 0.15
-                amt = random.randint(500, 5000000)
-                txn_id = f"TXN-{txn_counter:04d}"
-                merchant = random.choice(MERCHANTS)
-                route = random.choice(ROUTES)
-                r_lvl = "HIGH" if is_high else random.choice(["LOW", "LOW", "MEDIUM"])
-                status = random.choice(["FLAGGED", "BLOCKED"]) if is_high else random.choice(["CLEARED", "IN_TRANSIT", "DELIVERED"])
-                asyncio.create_task(_persist_txn(session_id, txn_id, amt, merchant, route, r_lvl, status))
-                if is_high:
-                    nid += 1
-                    notifications.append({"id": nid, "type": "danger",
-                                          "title": "High-Risk Transaction",
-                                          "message": f"{txn_id} — ₹{amt // 100:,} flagged", "time": _now()})
-                    asyncio.create_task(_persist_log(session_id, f"TXN {txn_id} flagged (₹{amt // 100:,})", "danger"))
-
-            # ── 7. Generate audit log (every 6s) ──
-            if tick % 6 == 0:
-                log_msgs = [
-                    ("JWT rotated", "info"), ("2FA TOTP verified", "success"),
-                    (f"Biometric trust: {trust_score}", "info"), ("Heartbeat OK", "info"),
-                    (f"Risk: {risk_level}", "warning" if risk_level != "LOW" else "info"),
-                ]
-                msg_text, msg_type = random.choice(log_msgs)
-                asyncio.create_task(_persist_log(session_id, msg_text, msg_type))
-
-            # ── 8. Threats (every 10s) ──
-            if tick % 10 == 0:
-                detail, severity = random.choice(THREAT_TYPES)
-                threats.insert(0, {
-                    "ip": f"{random.randint(1,254)}.{random.randint(0,254)}.{random.randint(0,254)}.{random.randint(1,254)}",
-                    "city": random.choice(THREAT_CITIES), "detail": detail,
-                    "severity": severity, "time": _now(),
-                    "blocked": severity in ("CRITICAL", "HIGH"),
-                })
-                threats = threats[:15]
-                if severity == "CRITICAL":
-                    nid += 1
-                    notifications.append({"id": nid, "type": "danger",
-                                          "title": "Critical Threat", "message": detail[:60], "time": _now()})
-
-            # ── 9. Geo anomaly (every 30s) ──
-            if tick % 30 == 0:
-                is_geo_anomaly = random.random() < 0.12
-                if is_geo_anomaly:
-                    nid += 1
-                    notifications.append({"id": nid, "type": "warning",
-                                          "title": "Geo Anomaly",
-                                          "message": f"Login from {random.choice(THREAT_CITIES)}", "time": _now()})
-
-            # ── 10. Trust warning ──
-            if trust_score < 55 and tick % 8 == 0:
-                nid += 1
-                notifications.append({"id": nid, "type": "warning",
-                                      "title": "Trust Score Low",
-                                      "message": f"Score: {trust_score} — step-up may trigger", "time": _now()})
-
-            # ── 11. Timeline ──
-            if tick % 12 == 0 and len(timeline) < 12:
-                icons = [("Auth Check", "🔑", "info"), ("Heartbeat", "♥", "success"),
-                         ("Risk Eval", "⚡", "warning"), ("Token Rotate", "🔄", "info")]
-                choice = random.choice(icons)
-                pct = min(95, len(timeline) * 9 + random.randint(0, 6))
-                timeline.append({"pct": pct, "label": choice[0], "icon": choice[1], "type": choice[2]})
-
+            # Timeline: just append current position
             t_out = [e for e in timeline if e.get("label") != "NOW"]
             t_out.append({"pct": 100, "label": "NOW", "icon": "●", "type": "now"})
 
-            # ── 12. System stats ──
-            system_stats["activeSessions"] = max(80, min(260, system_stats["activeSessions"] + random.randint(-2, 2)))
-            system_stats["avgTrustScore"] = round(system_stats["avgTrustScore"] * 0.9 + trust_score * 0.1, 1)
-            system_stats["p95Latency"] = round(max(8, min(40, system_stats["p95Latency"] + random.uniform(-1, 1))), 1)
-            system_stats["totalRequests"] += random.randint(15, 50)
-            system_stats["blockedThreats"] += (1 if tick % 10 == 0 else 0)
+            # ── 12. System stats (completely static to prevent UI flicker) ──
+            global_system_stats["avgTrustScore"] = round(global_system_stats["avgTrustScore"] * 0.95 + trust_score * 0.05, 1)
 
             elapsed = int(now - session_start)
             elapsed_str = f"{elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
 
-            for tab_id, tab in tabs_state.items():
+            for tab_id, tab in global_tabs_state.items():
                 if tab.get("focused") or tab.get("visible", True):
-                    tabs_state[tab_id]["lastAct"] = _now()
+                    global_tabs_state[tab_id]["lastAct"] = _now()
 
             txn_volume = sum(t.amount for t in cached_txns) // 100 if cached_txns else 0
 
             # ── 13. Build & send payload ──
-            # Convert tabs_state dict → list for the frontend
-            tabs_list = list(tabs_state.values())
+            # LIGHTWEIGHT tick: only fast-changing values (every second)
             payload = {
                 "remaining": remaining,
+                "expiresAt": int(time.time() * 1000) + (remaining * 1000),
                 "adaptedTimeout": adapted_timeout,
                 "riskLevel": risk_level,
                 "biometricScore": trust_score,
@@ -569,24 +544,29 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
                 "scrollPattern": scroll_pattern,
                 "clickPattern": click_pattern,
                 "dwellTime": dwell_time,
-                "tabs": tabs_list,
-                "sessionLog": cached_logs,
-                "riskFactors": risk_factors,
-                "transactions": cached_txn_dicts,
-                "timeline": t_out,
-                "geoAnomaly": is_geo_anomaly,
                 "showWarning": remaining <= 30,
                 "isActive": mouse_idle < 10,
-                "trustHistory": trust_history,
-                "threats": threats,
-                "systemStats": system_stats,
-                "notifications": notifications[-5:],
                 "sessionElapsed": elapsed_str,
-                "txnVolume": txn_volume,
-                # Client activity feed — visible on the server dashboard
-                "clientActivities": client_activities[:20],
             }
-            notifications = []
+
+            # FULL snapshot: heavy arrays only every 3 seconds to reduce React re-renders
+            if tick % 3 == 0:
+                tabs_list = list(global_tabs_state.values())
+                payload.update({
+                    "tabs": tabs_list,
+                    "sessionLog": cached_logs,
+                    "riskFactors": risk_factors,
+                    "transactions": cached_txn_dicts,
+                    "timeline": t_out,
+                    "geoAnomaly": is_geo_anomaly,
+                    "trustHistory": trust_history,
+                    "threats": threats,
+                    "systemStats": global_system_stats,
+                    "notifications": notifications[-5:],
+                    "txnVolume": txn_volume,
+                    "clientActivities": global_client_activities[:20],
+                })
+                notifications = []
 
             # Persist snapshot (fire-and-forget, every 5s)
             if tick % 5 == 0:
@@ -616,6 +596,7 @@ async def websocket_real_engine(websocket: WebSocket, session_id: str):
         import traceback
         traceback.print_exc()
     finally:
+        global_connections.discard(websocket)
         telemetry_task.cancel()
         await _persist_session(session_id, status="ENDED")
         await _persist_log(session_id, "Session disconnected", "warning")

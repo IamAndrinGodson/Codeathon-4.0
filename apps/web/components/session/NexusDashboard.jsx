@@ -33,31 +33,24 @@ const Dot = ({ c, pulse }) => (
 
 // 1. Executive Strip
 function ExecutiveStrip({ stats }) {
-  const [prev, setPrev] = useState(stats);
-  useEffect(() => { setPrev(stats); }, [stats]);
-
   const kpis = [
     { label: "SYS UPTIME", val: `${stats.uptime}% `, c: "#00e5a0" },
-    { label: "ACTIVE SESSIONS", val: stats.activeSessions, c: "#00c8b0", prevVal: prev.activeSessions },
-    { label: "AVG TRUST", val: stats.avgTrustScore, c: "#a78bfa", prevVal: prev.avgTrustScore },
+    { label: "ACTIVE SESSIONS", val: stats.activeSessions, c: "#00c8b0" },
+    { label: "AVG TRUST", val: stats.avgTrustScore, c: "#a78bfa" },
     { label: "P95 LATENCY", val: `${stats.p95Latency} ms`, c: stats.p95Latency > 30 ? "#f5c518" : "#00e5a0" },
-    { label: "THREATS BLOCKED", val: stats.blockedThreats, c: "#ff4d4d", prevVal: prev.blockedThreats },
+    { label: "THREATS BLOCKED", val: stats.blockedThreats, c: "#ff4d4d" },
   ];
 
   return (
     <div style={{ display: "flex", gap: 20, padding: "12px 28px", background: "#050910", borderBottom: "1px solid #1a2332", overflowX: "auto" }}>
-      {kpis.map((k, i) => {
-        const changed = k.prevVal !== undefined && k.val !== k.prevVal;
-        return (
+      {kpis.map((k, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", minWidth: 100 }}>
             <span style={{ fontSize: 8, letterSpacing: 2, color: "#3a5070", marginBottom: 4 }}>{k.label}</span>
             <span style={{
               fontSize: 16, fontWeight: 800, color: k.c, fontFamily: "'JetBrains Mono',monospace",
-              animation: changed ? `flashValue 1s ease` : "none"
             }}>{k.val}</span>
           </div>
-        )
-      })}
+        ))}
     </div>
   );
 }
@@ -113,10 +106,10 @@ function TrustScoreChart({ history }) {
               <stop offset="100%" stopColor={c} stopOpacity="0.0" />
             </linearGradient>
           </defs>
-          <polygon points={areaPoints} fill="url(#trustGrad)" style={{ transition: "all 0.5s" }} />
-          <polyline points={points} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transition: "all 0.5s", filter: `drop - shadow(0 0 4px ${c}88)` }} />
+          <polygon points={areaPoints} fill="url(#trustGrad)" style={{ transition: "all 3s linear" }} />
+          <polyline points={points} fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transition: "all 3s linear", filter: `drop-shadow(0 0 4px ${c}88)` }} />
           {history.length > 0 && (
-            <circle cx="100" cy={100 - curr} r="3" fill="#fff" stroke={c} strokeWidth="2" style={{ transition: "all 0.5s" }} />
+            <circle cx="100" cy={100 - curr} r="3" fill="#fff" stroke={c} strokeWidth="2" style={{ transition: "all 3s linear" }} />
           )}
         </svg>
       </div>
@@ -164,7 +157,7 @@ function RadarBiometrics({ scores }) {
           <line key={i} x1="50" y1="50" x2={getPt(100, i).split(",")[0]} y2={getPt(100, i).split(",")[1]} stroke="#1e2d45" strokeWidth="1" />
         ))}
         {/* Data polygon */}
-        <polygon points={points} fill={`${tc} 33`} stroke={tc} strokeWidth="1.5" style={{ transition: "all 0.5s ease" }} />
+        <polygon points={points} fill={`${tc}33`} stroke={tc} strokeWidth="1.5" style={{ transition: "all 1s linear" }} />
         {/* Labels */}
         {labels.map((l, i) => {
           const pt = getPt(115, i).split(",");
@@ -917,6 +910,7 @@ export default function App() {
   const logout = session?.logout ?? (() => { });
   const dismissToast = session?.dismissNotification ?? (() => { });
   const updatePolicies = session?.updatePolicies ?? (() => { });
+  const logPageView = session?.logPageView ?? (() => { });
   const toasty = session?.notifications ?? [];
 
   // Accumulate notifications into persistent history
@@ -928,6 +922,11 @@ export default function App() {
       });
     }
   }, [JSON.stringify(toasty)]);
+
+  // Broadcast internal view changes to WebSocket for Admin Dashboard
+  useEffect(() => {
+    logPageView(view);
+  }, [view]);
 
   // ── Timer: WS sends remaining every 1s — no client interpolation needed ──
   const [displayRemaining, setDisplayRemaining] = useState(wsRemaining);
@@ -1047,7 +1046,7 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", gap: 2, background: "rgba(10, 21, 32, 0.4)", borderRadius: 8, padding: 4, border: "1px solid #1e2d45", boxShadow: "inset 0 0 20px rgba(0,0,0,0.5)", overflowX: "auto" }}>
-            {[{ id: "dashboard", l: "DASHBOARD" }, { id: "policies", l: "POLICIES" }, { id: "audit", l: "AUDIT LOG" }, { id: "compare", l: "COMPARISON" }, { id: "techstack", l: "ARCHITECTURE" }].map(v => (
+            {[{ id: "dashboard", l: "DASHBOARD" }, { id: "audit", l: "AUDIT LOG" }].map(v => (
               <button key={v.id} className={`vnav-btn ${view === v.id ? "on" : "off"}`} onClick={() => setView(v.id)}>{v.l}</button>
             ))}
           </div>
@@ -1071,7 +1070,7 @@ export default function App() {
           </div>
         </nav>
 
-        <ExecutiveStrip stats={stats} />
+        {/* ExecutiveStrip removed — admin-only feature */}
 
         {/* DASHBOARD CONTENT */}
         {view === "dashboard" && (
@@ -1160,8 +1159,24 @@ export default function App() {
               </div>
 
 
-              {/* Client Activity Feed — real-time browser events from the client */}
-              <ClientActivityFeed activities={clientActivities} tabs={tabs} />
+              {/* Session Metadata (second column) */}
+              <div className="anim-panel anim-slide-up d3" style={{ background: "rgba(10,21,32,0.6)", backdropFilter: "blur(12px)", border: "1px solid #1e2d45", borderRadius: 14, padding: "20px", display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 9, letterSpacing: 3, color: "#555", marginBottom: 12 }}>NOTIFICATION HISTORY</div>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, maxHeight: 200, overflowY: "auto" }}>
+                  {notifHistory.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: 20, color: "#3a5070", fontSize: 11 }}>No notifications yet</div>
+                  ) : notifHistory.slice(0, 8).map((n, i) => {
+                    const nc = n.type === "success" ? "#00e5a0" : n.type === "warning" ? "#f5c518" : n.type === "danger" ? "#ff4d4d" : "#0088ff";
+                    return (
+                      <div key={`${n.id}-${i}`} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 10px", background: `${nc}08`, border: `1px solid ${nc}15`, borderRadius: 8 }}>
+                        <div style={{ width: 4, height: 4, borderRadius: "50%", background: nc, flexShrink: 0 }} />
+                        <span style={{ fontSize: 10, color: "#8aa0b8", flex: 1 }}>{n.title}: {n.message}</span>
+                        <span style={{ fontSize: 8, color: "#3a5070", fontFamily: "monospace" }}>{n.time}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
 
               {/* Risk Breakdown */}
@@ -1202,8 +1217,7 @@ export default function App() {
             </div>
 
             {/* Middle Row: Operational Controls */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 20, gridAutoRows: "1fr" }}>
-              <div style={{ gridColumn: "span 1" }}><ThreatFeed threats={threats} /></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20, gridAutoRows: "1fr" }}>
               <div style={{ gridColumn: "span 2" }}><RiskAdaptivePanel riskLevel={riskLevel} adaptedTimeout={adaptedTimeout} baseTimeout={120} factors={factors} /></div>
               <div style={{ gridColumn: "span 1" }}><CrossTabPanel tabs={tabs} onKillTab={killTab} /></div>
             </div>
@@ -1213,7 +1227,6 @@ export default function App() {
               <GeoFenceMap threatLevel={threatLevel} />
               <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
                 <ReplayTimeline events={liveTimeline} scrub={scrub} onScrub={setScrub} />
-                <TransactionsTable txns={liveTxns} />
               </div>
             </div>
 
@@ -1261,10 +1274,8 @@ export default function App() {
         )}
 
         {/* OTHER VIEWS */}
-        {view === "policies" && <PoliciesView updatePolicies={updatePolicies} />}
+        {/* PoliciesView removed — admin-only feature */}
         {view === "audit" && <AuditLogView logs={sessionLog} />}
-        {view === "compare" && <CompareView />}
-        {view === "techstack" && <TechStackView />}
 
       </div>
     </>

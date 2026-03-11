@@ -50,9 +50,8 @@ class CreateZoneRequest(BaseModel):
 
 # ─── IP LOOKUP ─────────────────────────────────────────────────────────────────
 @router.post("/lookup")
-async def geo_lookup(req: GeoLookupRequest, request=None):
+async def geo_lookup(req: GeoLookupRequest, request: Request = None):
     """Lookup geographic info for an IP address."""
-    from fastapi import Request as FastAPIRequest
     ip = req.ip_address
     if not ip and request:
         ip = request.client.host if request.client else None

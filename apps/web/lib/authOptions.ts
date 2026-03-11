@@ -18,7 +18,10 @@ export const authOptions: NextAuthOptions = {
                 try {
                     const res = await fetch(`${API_URL}/api/auth/login`, {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { 
+                            "Content-Type": "application/json",
+                            "ngrok-skip-browser-warning": "1",
+                        },
                         body: JSON.stringify({
                             email: credentials.email,
                             password: credentials.password,
@@ -26,7 +29,14 @@ export const authOptions: NextAuthOptions = {
                         }),
                     });
 
-                    const data = await res.json();
+                    // Defensive JSON parsing — handle HTML error pages from Ngrok/backend
+                    const text = await res.text();
+                    let data;
+                    try {
+                        data = JSON.parse(text);
+                    } catch {
+                        throw new Error("Backend returned a non-JSON response. Is the API server running?");
+                    }
 
                     if (!res.ok) {
                         throw new Error(data.detail || "Authentication failed");
